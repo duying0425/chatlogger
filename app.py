@@ -433,6 +433,7 @@ INDEX_PAGE = """
                             {% if chat.record_count %} | 已同步 {{ chat.record_count }} 条{% endif %}
                             {% if chat.base_url %} | <a href="{{ chat.base_url }}" target="_blank">查看表格</a>{% endif %}
                         </div>
+                        <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
                     </div>
                     <div class="chat-actions">
                         <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
