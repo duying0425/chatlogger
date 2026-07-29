@@ -487,6 +487,9 @@ INDEX_PAGE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>飞书群消息归档</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -546,7 +549,7 @@ INDEX_PAGE = """
         <h1>飞书群消息归档</h1>
         <div class="user">
             {{ user.name }}
-            <a href="/auth/logout">退出</a>
+            <a href="/auth/logout" onclick="return doLogout()">退出</a>
         </div>
     </div>
     <div class="container">
@@ -596,6 +599,14 @@ INDEX_PAGE = """
         </div>
     </div>
     <script>
+        // 退出登录：调用后端清 session，再强制跳转首页（带时间戳避免缓存）
+        function doLogout() {
+            fetch('/auth/logout', { cache: 'no-store' }).finally(() => {
+                location.href = '/?t=' + Date.now();
+            });
+            return false;
+        }
+
         function showToast(msg, type) {
             const toast = document.getElementById('toast');
             toast.textContent = msg;
