@@ -186,8 +186,8 @@ class FeishuClient:
             raise Exception(f"获取表格列表失败: {tables_data}")
         default_table_id = tables_data["data"]["items"][0]["table_id"]
 
-        # 3. 更新默认表名称
-        self._api_put(f"/bitable/v1/apps/{base_token}/tables/{default_table_id}", json={
+        # 3. 更新默认表名称（飞书更新数据表用 PATCH）
+        self._api_patch(f"/bitable/v1/apps/{base_token}/tables/{default_table_id}", json={
             "name": table_name,
         })
 
@@ -263,7 +263,7 @@ class FeishuClient:
 
         # 追加新附件
         existing.append({"file_token": file_token})
-        update_data = self._api_put(
+        update_data = self._api_patch(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}",
             json={"fields": {field_id: existing}},
         )
