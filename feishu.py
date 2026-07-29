@@ -204,11 +204,12 @@ class FeishuClient:
         if fields_data.get("code") == 0:
             items = fields_data["data"]["items"]
             # 飞书不允许删除 primary 主字段，把第一个字段（主键）改名为「发言人」
+            # 更新字段用 PUT（非 PATCH），且 type 必填
             if items:
                 primary = items[0]
-                self._api_patch(
+                self._api_put(
                     f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{primary['field_id']}",
-                    json={"field_name": "发言人"},
+                    json={"field_name": "发言人", "type": primary.get("type", 1)},
                 )
             # 删除其余默认字段
             for field in items[1:]:
