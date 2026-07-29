@@ -331,6 +331,39 @@ class FeishuClient:
         )
         return update_data.get("code") == 0
 
+    def get_chat_members(self, chat_id):
+        """获取群成员列表，返回 {open_id: name} 字典。
+        此接口直接返回 name，不需要通讯录权限。
+        权限要求：获取群成员信息（im:chat.member:read 或 获取与更新群组信息）。"""
+        result = {}
+        page_token = None
+        while True:
+            params = {"member_id_type": "open_id", "page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            try:
+                resp = requests.get(
+                    f"{Config.API_BASE}/im/v1/chats/{chat_id}/members",
+                    headers=self._headers(),
+                    params=params,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    print(f"[get_chat_members] 失败: {data}")
+                    return result
+                for m in data.get("data", {}).get("items", []):
+                    oid = m.get("member_id", "")
+                    name = m.get("name", "")
+                    if oid and name:
+                        result[oid] = name
+                if not data.get("data", {}).get("has_more"):
+                    break
+                page_token = data["data"].get("page_token")
+            except Exception as e:
+                print(f"[get_chat_members] 异常: {e}")
+                break
+        return result
+
     def batch_get_user_names(self, open_ids):
         """批量查询 open_id 对应的用户姓名。
         返回 {open_id: name} 字典。
