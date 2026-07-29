@@ -371,38 +371,6 @@ class FeishuClient:
                 break
         return result
 
-    def batch_get_user_names(self, open_ids):
-        """批量查询 open_id 对应的用户姓名。
-        返回 {open_id: name} 字典。
-        如果权限不足，返回空字典（调用方会回退到 open_id）。"""
-        if not open_ids:
-            return {}
-        result = {}
-        # 飞书 batch 接口单次最多 50 个
-        for i in range(0, len(open_ids), 50):
-            batch = open_ids[i:i + 50]
-            params = [("user_ids", uid) for uid in batch]
-            params.append(("user_id_type", "open_id"))
-            try:
-                resp = requests.get(
-                    f"{Config.API_BASE}/contact/v3/users/batch",
-                    headers=self._headers(),
-                    params=params,
-                )
-                data = resp.json()
-                if data.get("code") == 0:
-                    for u in data.get("data", {}).get("items", []):
-                        oid = u.get("open_id", "")
-                        name = u.get("name", "")
-                        if oid and name:
-                            result[oid] = name
-                else:
-                    # 权限不足等错误，静默返回空，调用方回退
-                    pass
-            except Exception:
-                pass
-        return result
-
     def get_field_id(self, base_token, table_id, field_name):
         """获取指定字段名的 field_id"""
         data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{table_id}/fields")

@@ -328,17 +328,10 @@ def _run_sync(user_id, chat_id):
             )
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
 
-        # 4. 查询发送者姓名
+        # 4. 查询发送者姓名（仅用群成员接口，无需通讯录权限）
         _set_progress(chat_id, stage="fetching_members", current=0, total=total,
                       message="获取群成员姓名...")
         sender_name_map = client.get_chat_members(chat_id)
-        sender_ids = set()
-        for m in messages:
-            sid = m.get("sender", {}).get("id", "")
-            if sid and sid.startswith("ou_") and sid not in sender_name_map:
-                sender_ids.add(sid)
-        if sender_ids:
-            sender_name_map.update(client.batch_get_user_names(list(sender_ids)))
 
         # 5. 准备记录数据
         _set_progress(chat_id, stage="preparing_records", current=0, total=total,
