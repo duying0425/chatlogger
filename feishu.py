@@ -287,23 +287,56 @@ class FeishuClient:
             raise Exception(f"上传文件失败: {data}")
         return data["data"]["file_token"]
 
-    def upload_attachment_to_record(self, base_token, table_id, record_id, field_id, file_token):
-        """将已上传的 file_token 追加到记录的附件字段"""
+    def upload_attachment_to_record(self, base_token, table_id, record_id, field_name, file_token):
+        """将已上传的 file_token 追加到记录的附件字段。
+        注意：飞书记录 fields 用 field_name 作 key（非 field_id）"""
         # 先读取当前附件字段值
         data = self._api_get(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}"
         )
         existing = []
         if data.get("code") == 0:
-            existing = data["data"]["record"]["fields"].get(field_id, [])
+            existing = data["data"]["record"]["fields"].get(field_name, []) or []
 
         # 追加新附件
         existing.append({"file_token": file_token})
         update_data = self._api_patch(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}",
-            json={"fields": {field_id: existing}},
+            json={"fields": {field_name: existing}},
         )
         return update_data.get("code") == 0
+
+    def batch_get_user_names(self, open_ids):
+        """批量查询 open_id 对应的用户姓名。
+        返回 {open_id: name} 字典。
+        如果权限不足，返回空字典（调用方会回退到 open_id）。"""
+        if not open_ids:
+            return {}
+        result = {}
+        # 飞书 batch 接口单次最多 50 个
+        for i in range(0, len(open_ids), 50):
+            batch = open_ids[i:i + 50]
+            params = [("user_ids", uid) for uid in batch]
+            params.append(("user_id_type", "open_id"))
+            try:
+                resp = requests.get(
+                    f"{Config.API_BASE}/contact/v3/users/batch",
+                    headers=self._headers(),
+                    params=params,
+                )
+                data = resp.json()
+                if data.get("code") == 0:
+                    for u in data.get("data", {}).get("items", []):
+                        oid = u.get("open_id", "")
+                        name = u.get("name", "")
+                        if oid and name:
+                            result[oid] = name
+                else:
+                    # 权限不足等错误，静默返回空，调用方回退
+                    pass
+            except Exception:
+                pass
+        return result
 
     def get_field_id(self, base_token, table_id, field_name):
         """获取指定字段名的 field_id"""
@@ -359,7 +392,19 @@ def process_message_content(msg):
     elif msg_type == "video_chat":
         return "[视频通话]"
     elif msg_type == "system":
-        return content_str
+        # 系统消息 content 形如 {"template":"{from_user} invited {to_chatters}...","from_user":["张三"],...}
+        try:
+            import json
+            c = json.loads(content_str)
+            template = c.get("template", "")
+            # 替换 {from_user}/{to_chatters}/{to_user} 等占位符为实际值
+            for key in ("from_user", "to_chatters", "to_user"):
+                val = c.get(key)
+                if val and isinstance(val, list):
+                    template = template.replace("{" + key + "}", "、".join(val))
+            return template if template else content_str
+        except (json.JSONDecodeError, TypeError):
+            return content_str
     else:
         return content_str if content_str else f"[{msg_type}]"
 

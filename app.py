@@ -243,14 +243,20 @@ def api_sync(chat_id):
             )
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
 
-        # 4. 获取附件字段 ID
-        attach_field_id = client.get_field_id(base_token, table_id, "附件")
+        # 4. 批量查询发送者姓名（open_id -> name）
+        sender_ids = set()
+        for m in messages:
+            sid = m.get("sender", {}).get("id", "")
+            if sid and sid.startswith("ou_"):
+                sender_ids.add(sid)
+        sender_name_map = client.batch_get_user_names(list(sender_ids)) if sender_ids else {}
 
         # 5. 准备记录数据
         records = []
         msg_resources = {}  # message_id -> [resource_info]
         for m in messages:
-            sender = get_sender_name(m)
+            sender_id = m.get("sender", {}).get("id", "")
+            sender = sender_name_map.get(sender_id) or get_sender_name(m)
             # 飞书多维表格日期字段要求毫秒时间戳
             create_time = m.get("create_time")
             try:
@@ -292,7 +298,7 @@ def api_sync(chat_id):
                     )
                     file_token = client.upload_file(base_token, file_content, filename)
                     client.upload_attachment_to_record(
-                        base_token, table_id, record_id, attach_field_id, file_token
+                        base_token, table_id, record_id, "附件", file_token
                     )
                     attach_count += 1
                 except Exception as e:

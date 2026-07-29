@@ -19,7 +19,7 @@ class Config:
     API_BASE = "https://open.feishu.cn/open-apis"
 
     # 需要申请的 OAuth scope（空格分隔）
-    OAUTH_SCOPES = "im:message:readonly im:message.group_msg:get_as_user bitable:app offline_access"
+    OAUTH_SCOPES = "im:message:readonly im:message.group_msg:get_as_user bitable:app contact:contact.base:readonly offline_access"
 
     # ===== 应用配置 =====
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-this-to-a-random-secret-key")
