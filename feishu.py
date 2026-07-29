@@ -59,9 +59,9 @@ class FeishuClient:
         resp = requests.get(url, headers=self._headers(), params=params)
         return resp.json()
 
-    def _api_post(self, path, json_data=None):
+    def _api_post(self, path, json=None):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.post(url, headers=self._headers(), json=json_data)
+        resp = requests.post(url, headers=self._headers(), json=json)
         return resp.json()
 
     # ===== OAuth 静态方法 =====
