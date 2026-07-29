@@ -246,8 +246,10 @@ class FeishuClient:
         return resp.json()
 
     def delete_bitable(self, base_token):
-        """删除多维表格"""
-        data = self._api_delete(f"/bitable/v1/apps/{base_token}")
+        """删除多维表格（走云文档接口，type=bitable）"""
+        url = f"{Config.API_BASE}/drive/v1/files/{base_token}"
+        resp = requests.delete(url, headers=self._headers(), params={"type": "bitable"})
+        data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"删除多维表格失败: {data}")
         return True
