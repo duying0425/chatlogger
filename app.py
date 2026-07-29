@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from flask import Flask, request, redirect, session, jsonify, render_template_string
+from flask import Flask, request, redirect, session, jsonify, render_template_string, make_response
 from config import Config
 import models
 from feishu import (
@@ -58,10 +58,14 @@ def timestamp_to_datetime(ts):
 def index():
     user = get_current_user()
     if not user:
-        return render_template_string(LOGIN_PAGE, auth_url=FeishuClient.get_authorize_url())
+        resp = make_response(render_template_string(LOGIN_PAGE, auth_url=FeishuClient.get_authorize_url()))
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
 
     chats = models.get_chats(user["id"])
-    return render_template_string(INDEX_PAGE, user=user, chats=chats)
+    resp = make_response(render_template_string(INDEX_PAGE, user=user, chats=chats))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 # ===== OAuth 路由 =====
 
