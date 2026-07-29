@@ -561,9 +561,9 @@ INDEX_PAGE = """
                 <div class="chat-item" id="chat-{{ chat.chat_id }}">
                     <div class="chat-info">
                         <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
-                        <div class="meta">
+                        <div class="meta" id="meta-{{ chat.chat_id }}">
                             ID: {{ chat.chat_id }}
-                            {% if chat.record_count %} | 已同步 {{ chat.record_count }} 条{% endif %}
+                            {% if chat.record_count %} | 已同步 <span class="record-count">{{ chat.record_count }}</span> 条{% endif %}
                             {% if chat.base_url %} | <a href="{{ chat.base_url }}" target="_blank">查看表格</a>{% endif %}
                         </div>
                         <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
@@ -699,7 +699,8 @@ INDEX_PAGE = """
                                 (r.attach_count > 0 ? '，附件 ' + r.attach_count + ' 个' : '') +
                                 (r.skipped_count > 0 ? '，跳过大附件 ' + r.skipped_count + ' 个' : '');
                             showToast(msg, 'success');
-                            setTimeout(() => location.reload(), 2500);
+                            // 直接更新 meta 行，无需刷新页面
+                            updateMetaAfterSync(chatId, r);
                         } else if (p.stage === 'error') {
                             showToast(p.error || p.message || '同步失败', 'error');
                         }
@@ -708,6 +709,36 @@ INDEX_PAGE = """
                     // 网络错误不停止轮询，等下一轮重试
                 }
             }, 800);
+        }
+
+        // 同步完成后直接更新 meta 行：已同步条数 + 飞书表格链接
+        function updateMetaAfterSync(chatId, result) {
+            const meta = document.getElementById('meta-' + chatId);
+            if (!meta) return;
+            // 更新已同步条数
+            let countSpan = meta.querySelector('.record-count');
+            if (countSpan) {
+                countSpan.textContent = result.total_records || 0;
+            } else if (result.total_records) {
+                // 之前没有 record_count，追加
+                const cnt = document.createElement('span');
+                cnt.innerHTML = ' | 已同步 <span class="record-count">' + result.total_records + '</span> 条';
+                meta.appendChild(cnt);
+            }
+            // 追加查看表格链接（如不存在）
+            if (result.base_url && !meta.querySelector('a[href="' + result.base_url + '"]')) {
+                const link = document.createElement('span');
+                link.innerHTML = ' | <a href="' + result.base_url + '" target="_blank">查看表格</a>';
+                meta.appendChild(link);
+            }
+            // 同时刷新 stats 里的待同步条数（待同步应变为 0）
+            const statsEl = document.querySelector('.stats[data-chat-id="' + chatId + '"]');
+            if (statsEl) {
+                const total = result.total_records || 0;
+                const m = statsEl.textContent.match(/(\d+)\s*\/\s*(\d+)/);
+                const totalInStats = m ? parseInt(m[2]) : total;
+                statsEl.textContent = '| 已同步 ' + total + ' / ' + totalInStats + ' 条';
+            }
         }
 
         async function syncChat(chatId, btn) {
