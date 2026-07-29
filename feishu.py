@@ -219,6 +219,11 @@ class FeishuClient:
         resp = requests.put(url, headers=self._headers(), json=json)
         return resp.json()
 
+    def _api_patch(self, path, json=None):
+        url = f"{Config.API_BASE}{path}"
+        resp = requests.patch(url, headers=self._headers(), json=json)
+        return resp.json()
+
     def batch_create_records(self, base_token, table_id, records):
         """批量创建记录，每批最多 500 条"""
         all_record_ids = []
