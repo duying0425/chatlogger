@@ -1,6 +1,8 @@
 import os
 import time
 import json
+import threading
+import traceback
 from flask import Flask, request, redirect, session, jsonify, render_template_string, make_response
 from config import Config
 import models
@@ -17,6 +19,29 @@ app.secret_key = Config.SECRET_KEY
 
 # 确保数据库初始化
 models.init_db()
+
+# ===== 同步进度全局状态 =====
+# sync_progress[chat_id] = {"running": bool, "stage": str, "current": int, "total": int, "message": str, "result": dict, "error": str}
+sync_progress = {}
+sync_lock = threading.Lock()
+
+
+def _set_progress(chat_id, stage, current=0, total=0, message="", result=None, error=None, running=True):
+    with sync_lock:
+        sync_progress[chat_id] = {
+            "running": running,
+            "stage": stage,
+            "current": current,
+            "total": total,
+            "message": message,
+            "result": result,
+            "error": error,
+        }
+
+
+def _get_progress(chat_id):
+    with sync_lock:
+        return sync_progress.get(chat_id)
 
 # ===== 辅助函数 =====
 
@@ -203,6 +228,7 @@ def api_delete_chat(chat_id):
 
 @app.route("/api/sync/<chat_id>", methods=["POST"])
 def api_sync(chat_id):
+    """启动同步任务（后台线程执行），立即返回。"""
     user = get_current_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
@@ -215,8 +241,58 @@ def api_sync(chat_id):
     if not chat_config:
         return jsonify({"error": "群聊未配置"}), 404
 
+    # 防止重复点击：如果已有任务在运行，拒绝
+    progress = _get_progress(chat_id)
+    if progress and progress.get("running"):
+        return jsonify({"error": "已有同步任务进行中", "progress": progress}), 409
+
+    # 初始化进度状态
+    _set_progress(chat_id, stage="starting", current=0, total=0, message="准备开始同步...", running=True)
+
+    # 启动后台线程
+    t = threading.Thread(target=_run_sync, args=(user["id"], chat_id), daemon=True)
+    t.start()
+
+    return jsonify({"ok": True, "message": "同步任务已启动", "started": True})
+
+
+@app.route("/api/sync_status/<chat_id>", methods=["GET"])
+def api_sync_status(chat_id):
+    """查询同步进度"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    progress = _get_progress(chat_id)
+    if not progress:
+        return jsonify({"running": False, "stage": "idle", "message": "暂无任务"})
+    return jsonify(progress)
+
+
+def _run_sync(user_id, chat_id):
+    """在后台线程中执行同步主流程，实时更新进度状态。"""
+    # 在子线程中重新获取用户和 client（Flask session 在子线程不可用）
+    user = models.get_user(user_id)
+    if not user or not user.get("access_token"):
+        _set_progress(chat_id, stage="error", running=False, error="Token 无效，请重新登录")
+        return
+
+    client = FeishuClient(
+        access_token=user["access_token"],
+        refresh_token=user["refresh_token"],
+        token_expires_at=user["token_expires_at"],
+        refresh_expires_at=user["refresh_expires_at"],
+        user_id=user["id"],
+    )
+
     try:
+        chat_config = models.get_chat(user["id"], chat_id)
+        if not chat_config:
+            _set_progress(chat_id, stage="error", running=False, error="群聊未配置")
+            return
+
         # 1. 获取群名称（如果还没有）
+        _set_progress(chat_id, stage="fetching_chat_info", message="获取群信息...")
         chat_name = chat_config.get("chat_name") or chat_id
         try:
             chat_info = client.get_chat_info(chat_id)
@@ -225,11 +301,18 @@ def api_sync(chat_id):
             pass
 
         # 2. 获取新消息
+        _set_progress(chat_id, stage="fetching_messages", message="拉取群消息...")
         last_position = chat_config.get("last_synced_position", 0) or 0
         messages = client.list_all_messages(chat_id, start_position=last_position)
 
         if not messages:
-            return jsonify({"ok": True, "message": "没有新消息", "new_count": 0})
+            _set_progress(chat_id, stage="done", running=False, message="没有新消息",
+                          result={"ok": True, "new_count": 0, "message": "没有新消息"})
+            return
+
+        total = len(messages)
+        _set_progress(chat_id, stage="messages_fetched", current=0, total=total,
+                      message=f"已拉取 {total} 条新消息")
 
         # 3. 确保多维表格存在
         base_token = chat_config.get("base_token")
@@ -237,17 +320,18 @@ def api_sync(chat_id):
         base_url = chat_config.get("base_url")
 
         if not base_token:
-            # 首次同步，创建多维表格
+            _set_progress(chat_id, stage="creating_bitable", current=0, total=total,
+                          message="首次同步，创建多维表格...")
             base_token, table_id, base_url = client.create_bitable(
                 name=f"{chat_name}-群消息记录",
                 table_name="消息记录"
             )
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
 
-        # 4. 查询发送者姓名（open_id -> name）
-        # 优先用群成员接口（不需要通讯录权限，直接返回 name）
+        # 4. 查询发送者姓名
+        _set_progress(chat_id, stage="fetching_members", current=0, total=total,
+                      message="获取群成员姓名...")
         sender_name_map = client.get_chat_members(chat_id)
-        # 群成员接口查不到的（如已退群成员），回退到通讯录接口
         sender_ids = set()
         for m in messages:
             sid = m.get("sender", {}).get("id", "")
@@ -257,12 +341,13 @@ def api_sync(chat_id):
             sender_name_map.update(client.batch_get_user_names(list(sender_ids)))
 
         # 5. 准备记录数据
+        _set_progress(chat_id, stage="preparing_records", current=0, total=total,
+                      message=f"准备记录数据 (0/{total})...")
         records = []
-        msg_resources = {}  # message_id -> [resource_info]
-        for m in messages:
+        msg_resources = {}
+        for idx, m in enumerate(messages):
             sender_id = m.get("sender", {}).get("id", "")
             sender = sender_name_map.get(sender_id) or get_sender_name(m)
-            # 飞书多维表格日期字段要求毫秒时间戳
             create_time = m.get("create_time")
             try:
                 date_value = int(create_time)
@@ -277,21 +362,37 @@ def api_sync(chat_id):
             }
             records.append(record)
 
-            # 提取资源
             resources = extract_resource_keys(m)
             if resources:
                 msg_resources[m["message_id"]] = resources
 
+            # 每处理 50 条更新一次进度，避免过于频繁
+            if (idx + 1) % 50 == 0 or idx + 1 == total:
+                _set_progress(chat_id, stage="preparing_records", current=idx + 1, total=total,
+                              message=f"准备记录数据 ({idx + 1}/{total})...")
+
         # 6. 批量写入记录
-        print(f"[DEBUG] 准备写入 {len(records)} 条记录，前3条样本:")
-        for i, r in enumerate(records[:3]):
-            print(f"  [{i}] {r}")
+        _set_progress(chat_id, stage="writing_records", current=0, total=total,
+                      message=f"写入多维表格 (0/{total})...")
+        print(f"[DEBUG] 准备写入 {len(records)} 条记录")
         record_ids = client.batch_create_records(base_token, table_id, records)
         print(f"[DEBUG] 写入完成，返回 {len(record_ids)} 个 record_id")
+        _set_progress(chat_id, stage="records_written", current=total, total=total,
+                      message=f"记录写入完成 ({len(record_ids)} 条)")
 
         # 7. 下载并上传附件
         attach_count = 0
         skipped_count = 0
+        # 计算附件总数（用于进度展示）
+        total_attach_tasks = sum(len(msg_resources.get(m["message_id"], [])) for m in messages)
+        if total_attach_tasks > 0:
+            _set_progress(chat_id, stage="uploading_attachments", current=0, total=total_attach_tasks,
+                          message=f"上传附件 (0/{total_attach_tasks})...")
+        else:
+            _set_progress(chat_id, stage="uploading_attachments", current=0, total=0,
+                          message="无附件")
+
+        attach_done = 0
         for i, m in enumerate(messages):
             msg_id = m["message_id"]
             resources = msg_resources.get(msg_id, [])
@@ -315,29 +416,40 @@ def api_sync(chat_id):
                     skipped_count += 1
                     print(f"[跳过大附件] {e}")
                 except Exception as e:
-                    # 附件上传失败不中断整体流程
                     print(f"附件上传失败: {e}")
+                finally:
+                    attach_done += 1
+                    _set_progress(chat_id, stage="uploading_attachments",
+                                 current=attach_done, total=total_attach_tasks,
+                                 message=f"上传附件 ({attach_done}/{total_attach_tasks})...")
 
         # 8. 更新同步状态
         new_last_position = int(messages[-1].get("message_position") or 0)
         new_record_count = (chat_config.get("record_count", 0) or 0) + len(messages)
         models.update_chat_sync_status(user["id"], chat_id, new_last_position, new_record_count)
 
-        # 更新群名称（如果之前没有）
         if not chat_config.get("chat_name"):
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
 
-        return jsonify({
+        result = {
             "ok": True,
             "new_count": len(messages),
             "attach_count": attach_count,
             "skipped_count": skipped_count,
             "total_records": new_record_count,
             "base_url": base_url,
-        })
+        }
+        _set_progress(chat_id, stage="done", running=False,
+                      current=total, total=total,
+                      message=f"同步完成：新增 {len(messages)} 条消息" +
+                              (f"，附件 {attach_count} 个" if attach_count > 0 else "") +
+                              (f"，跳过大附件 {skipped_count} 个" if skipped_count > 0 else ""),
+                      result=result)
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"[SYNC ERROR] {traceback.format_exc()}")
+        _set_progress(chat_id, stage="error", running=False, error=str(e),
+                      message=f"同步失败: {e}")
 
 
 # ===== 页面模板 =====
@@ -420,6 +532,13 @@ INDEX_PAGE = """
         .modal-btns .btn-only-config:hover { background: #2860e1; }
         .modal-btns .btn-delete-all { background: #f53f3f; color: white; }
         .modal-btns .btn-delete-all:hover { background: #d93636; }
+        /* 同步进度条 */
+        .sync-progress { margin-top: 10px; display: none; }
+        .sync-progress .stage { font-size: 12px; color: #4e5969; margin-bottom: 6px; line-height: 1.4; }
+        .sync-progress .bar-wrap { width: 100%; height: 6px; background: #f2f3f5; border-radius: 3px; overflow: hidden; }
+        .sync-progress .bar { height: 100%; background: linear-gradient(90deg, #3370ff, #00b42a); border-radius: 3px; width: 0%; transition: width 0.3s; }
+        .sync-progress.error .bar { background: #f53f3f; }
+        .sync-progress.done .bar { background: #00b42a; }
     </style>
 </head>
 <body>
@@ -448,6 +567,10 @@ INDEX_PAGE = """
                             {% if chat.base_url %} | <a href="{{ chat.base_url }}" target="_blank">查看表格</a>{% endif %}
                         </div>
                         <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
+                        <div class="sync-progress" id="progress-{{ chat.chat_id }}">
+                            <div class="stage">准备中...</div>
+                            <div class="bar-wrap"><div class="bar"></div></div>
+                        </div>
                     </div>
                     <div class="chat-actions">
                         <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
@@ -519,18 +642,87 @@ INDEX_PAGE = """
             }
         }
 
+        // 阶段中文映射
+        const STAGE_LABEL = {
+            starting: '准备开始',
+            fetching_chat_info: '获取群信息',
+            fetching_messages: '拉取群消息',
+            messages_fetched: '消息拉取完成',
+            creating_bitable: '创建多维表格',
+            fetching_members: '获取群成员姓名',
+            preparing_records: '准备记录数据',
+            writing_records: '写入多维表格',
+            records_written: '记录写入完成',
+            uploading_attachments: '上传附件',
+            done: '同步完成',
+            error: '同步失败',
+            idle: '空闲'
+        };
+
+        function updateProgressUI(chatId, p) {
+            const wrap = document.getElementById('progress-' + chatId);
+            if (!wrap) return;
+            const stageEl = wrap.querySelector('.stage');
+            const barEl = wrap.querySelector('.bar');
+            const stageText = STAGE_LABEL[p.stage] || p.stage;
+            let percent = 0;
+            if (p.total > 0) percent = Math.min(100, Math.round((p.current / p.total) * 100));
+            else if (p.stage === 'done') percent = 100;
+            stageEl.textContent = (p.message || stageText) + (p.total > 0 ? ' (' + p.current + '/' + p.total + ')' : '');
+            barEl.style.width = percent + '%';
+            wrap.classList.remove('error', 'done');
+            if (p.stage === 'done') wrap.classList.add('done');
+            if (p.stage === 'error') wrap.classList.add('error');
+            wrap.style.display = 'block';
+        }
+
+        const syncTimers = {};
+        function stopPolling(chatId) {
+            if (syncTimers[chatId]) {
+                clearInterval(syncTimers[chatId]);
+                syncTimers[chatId] = null;
+            }
+        }
+        function startPolling(chatId, btn) {
+            stopPolling(chatId);
+            syncTimers[chatId] = setInterval(async () => {
+                try {
+                    const resp = await fetch('/api/sync_status/' + chatId);
+                    const p = await resp.json();
+                    updateProgressUI(chatId, p);
+                    if (!p.running) {
+                        stopPolling(chatId);
+                        if (btn) { btn.disabled = false; btn.textContent = '同步'; }
+                        if (p.stage === 'done') {
+                            const r = p.result || {};
+                            const msg = '同步成功：新增 ' + (r.new_count || 0) + ' 条消息' +
+                                (r.attach_count > 0 ? '，附件 ' + r.attach_count + ' 个' : '') +
+                                (r.skipped_count > 0 ? '，跳过大附件 ' + r.skipped_count + ' 个' : '');
+                            showToast(msg, 'success');
+                            setTimeout(() => location.reload(), 2500);
+                        } else if (p.stage === 'error') {
+                            showToast(p.error || p.message || '同步失败', 'error');
+                        }
+                    }
+                } catch (e) {
+                    // 网络错误不停止轮询，等下一轮重试
+                }
+            }, 800);
+        }
+
         async function syncChat(chatId, btn) {
             btn.disabled = true;
             btn.textContent = '同步中...';
+            // 立即显示进度条占位
+            updateProgressUI(chatId, { stage: 'starting', current: 0, total: 0, message: '准备开始同步...' });
             try {
                 const resp = await fetch('/api/sync/' + chatId, { method: 'POST' });
                 const data = await resp.json();
-                if (data.ok) {
-                    const msg = '同步成功：新增 ' + data.new_count + ' 条消息' +
-                        (data.attach_count > 0 ? '，附件 ' + data.attach_count + ' 个' : '') +
-                        (data.skipped_count > 0 ? '，跳过大附件 ' + data.skipped_count + ' 个' : '');
-                    showToast(msg, 'success');
-                    setTimeout(() => location.reload(), 2000);
+                if (data.ok || data.started) {
+                    startPolling(chatId, btn);
+                } else if (data.error && data.error.indexOf('进行中') >= 0) {
+                    // 已有任务在运行，直接开始轮询
+                    startPolling(chatId, btn);
                 } else {
                     showToast(data.error || '同步失败', 'error');
                     btn.disabled = false;
@@ -564,6 +756,17 @@ INDEX_PAGE = """
                 } catch (e) {
                     // 查询失败保持原状
                 }
+                // 顺便检查是否有正在运行的后台同步任务（支持刷新页面后恢复进度显示）
+                try {
+                    const sr = await fetch('/api/sync_status/' + chatId);
+                    const sp = await sr.json();
+                    if (sp && sp.running) {
+                        const btn = document.querySelector('#chat-' + chatId + ' .btn-sync');
+                        if (btn) { btn.disabled = true; btn.textContent = '同步中...'; }
+                        updateProgressUI(chatId, sp);
+                        startPolling(chatId, btn);
+                    }
+                } catch (e) {}
             });
         });
 
