@@ -518,10 +518,10 @@ INDEX_PAGE = """
         .btn-delete { padding: 8px 16px; background: #f53f3f; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
         .btn-delete:hover { background: #d93636; }
         .empty { text-align: center; padding: 48px; color: #8f959e; }
-        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 24px; border-radius: 8px; color: white; font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s; }
+        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 24px; border-radius: 8px; color: white; font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
         .toast.success { background: #00b42a; }
         .toast.error { background: #f53f3f; }
-        .toast.show { opacity: 1; }
+        .toast.show { opacity: 1; pointer-events: auto; }
         .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; justify-content: center; align-items: center; z-index: 1000; pointer-events: none; }
         .modal-mask.show { display: flex; pointer-events: auto; }
         .modal { background: white; border-radius: 12px; padding: 28px 32px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
@@ -549,7 +549,7 @@ INDEX_PAGE = """
         <h1>飞书群消息归档</h1>
         <div class="user">
             {{ user.name }}
-            <a href="/auth/logout" style="margin-left:16px;color:#3370ff;cursor:pointer;">退出</a>
+            <a href="/auth/logout">退出</a>
         </div>
     </div>
     <div class="container">
