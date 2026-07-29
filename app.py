@@ -522,8 +522,8 @@ INDEX_PAGE = """
         .toast.success { background: #00b42a; }
         .toast.error { background: #f53f3f; }
         .toast.show { opacity: 1; }
-        .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; justify-content: center; align-items: center; z-index: 1000; }
-        .modal-mask.show { display: flex; }
+        .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; justify-content: center; align-items: center; z-index: 1000; pointer-events: none; }
+        .modal-mask.show { display: flex; pointer-events: auto; }
         .modal { background: white; border-radius: 12px; padding: 28px 32px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
         .modal h3 { font-size: 17px; margin-bottom: 8px; }
         .modal p { font-size: 13px; color: #646a73; margin-bottom: 20px; line-height: 1.6; }
@@ -549,7 +549,7 @@ INDEX_PAGE = """
         <h1>飞书群消息归档</h1>
         <div class="user">
             {{ user.name }}
-            <a href="/auth/logout" onclick="return doLogout()">退出</a>
+            <a href="/auth/logout" style="margin-left:16px;color:#3370ff;cursor:pointer;">退出</a>
         </div>
     </div>
     <div class="container">
@@ -599,14 +599,6 @@ INDEX_PAGE = """
         </div>
     </div>
     <script>
-        // 退出登录：调用后端清 session，再强制跳转首页（带时间戳避免缓存）
-        function doLogout() {
-            fetch('/auth/logout', { cache: 'no-store' }).finally(() => {
-                location.href = '/?t=' + Date.now();
-            });
-            return false;
-        }
-
         function showToast(msg, type) {
             const toast = document.getElementById('toast');
             toast.textContent = msg;
