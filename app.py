@@ -204,12 +204,17 @@ def api_sync(chat_id):
         msg_resources = {}  # message_id -> [resource_info]
         for m in messages:
             sender = get_sender_name(m)
-            date_str = timestamp_to_datetime(m.get("create_time"))
+            # 飞书多维表格日期字段要求毫秒时间戳
+            create_time = m.get("create_time")
+            try:
+                date_value = int(create_time)
+            except (TypeError, ValueError):
+                date_value = None
             content = process_message_content(m)
 
             record = {
                 "发言人": sender,
-                "日期": date_str,
+                "日期": date_value,
                 "消息内容": content,
             }
             records.append(record)
