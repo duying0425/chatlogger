@@ -309,20 +309,25 @@ class FeishuClient:
 
     def upload_attachment_to_record(self, base_token, table_id, record_id, field_name, file_token):
         """将已上传的 file_token 追加到记录的附件字段。
-        注意：飞书记录 fields 用 field_name 作 key（非 field_id）"""
-        # 先读取当前附件字段值
+        注意：飞书记录 fields 用 field_name 作 key（非 field_id）；
+        单条更新记录用 PUT（会覆盖所有字段，需先读全部字段再合并附件）。"""
+        # 读取当前记录的全部字段
         data = self._api_get(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}"
         )
-        existing = []
-        if data.get("code") == 0:
-            existing = data["data"]["record"]["fields"].get(field_name, []) or []
+        if data.get("code") != 0:
+            return False
+        all_fields = data["data"]["record"]["fields"]
 
-        # 追加新附件
+        # 追加新附件到指定字段
+        existing = all_fields.get(field_name, []) or []
         existing.append({"file_token": file_token})
-        update_data = self._api_patch(
+        all_fields[field_name] = existing
+
+        # PUT 更新记录（会覆盖所有字段，所以传全部字段）
+        update_data = self._api_put(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}",
-            json={"fields": {field_name: existing}},
+            json={"fields": all_fields},
         )
         return update_data.get("code") == 0
 
