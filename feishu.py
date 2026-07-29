@@ -199,18 +199,26 @@ class FeishuClient:
             "name": table_name,
         })
 
-        # 4. 删除默认字段，创建我们需要的字段
+        # 4. 整理字段：首个默认字段改名为「发言人」，其余默认字段删除，再新建所需字段
         fields_data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields")
         if fields_data.get("code") == 0:
-            for field in fields_data["data"]["items"]:
-                if field["field_name"] not in ["多行文本"]:
-                    # 不删除，只更新
-                    pass
+            items = fields_data["data"]["items"]
+            # 飞书不允许删除 primary 主字段，把第一个字段（主键）改名为「发言人」
+            if items:
+                primary = items[0]
+                self._api_patch(
+                    f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{primary['field_id']}",
+                    json={"field_name": "发言人"},
+                )
+            # 删除其余默认字段
+            for field in items[1:]:
+                self._api_delete(
+                    f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{field['field_id']}"
+                )
 
-        # 创建字段：发言人、日期、消息内容、附件
+        # 创建字段：时间、消息内容、附件（发言人已由主字段改名而来）
         field_defs = [
-            {"field_name": "发言人", "type": 1},
-            {"field_name": "日期", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
+            {"field_name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
             {"field_name": "消息内容", "type": 1},
             {"field_name": "附件", "type": 17},
         ]
@@ -230,6 +238,11 @@ class FeishuClient:
     def _api_patch(self, path, json=None):
         url = f"{Config.API_BASE}{path}"
         resp = requests.patch(url, headers=self._headers(), json=json)
+        return resp.json()
+
+    def _api_delete(self, path):
+        url = f"{Config.API_BASE}{path}"
+        resp = requests.delete(url, headers=self._headers())
         return resp.json()
 
     def batch_create_records(self, base_token, table_id, records):

@@ -243,7 +243,7 @@ def api_sync(chat_id):
 
             record = {
                 "发言人": sender,
-                "日期": date_value,
+                "时间": date_value,
                 "消息内容": content,
             }
             records.append(record)
