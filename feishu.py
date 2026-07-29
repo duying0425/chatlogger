@@ -116,7 +116,7 @@ class FeishuClient:
             "container_id": chat_id,
             "container_id_type": "chat",
             "page_size": page_size,
-            "sort_type": "ByCreateTime",
+            "sort_type": "ByCreateTimeAsc",
         }
         if page_token:
             params["page_token"] = page_token
