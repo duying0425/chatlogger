@@ -229,6 +229,16 @@ class FeishuClient:
                 json=fd,
             )
 
+        # 5. 删除飞书自动创建的默认空记录
+        rec_data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/records?page_size=500")
+        if rec_data.get("code") == 0:
+            default_record_ids = [r["record_id"] for r in rec_data["data"].get("items", []) if not r.get("fields")]
+            if default_record_ids:
+                self._api_post(
+                    f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/records/batch_delete",
+                    json={"records": default_record_ids},
+                )
+
         return base_token, default_table_id, base_url
 
     def _api_put(self, path, json=None):
