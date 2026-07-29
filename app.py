@@ -117,6 +117,35 @@ def api_get_chats():
     chats = models.get_chats(user["id"])
     return jsonify({"chats": chats})
 
+@app.route("/api/chat_stats/<chat_id>", methods=["GET"])
+def api_chat_stats(chat_id):
+    """实时查询群消息总数，返回已同步/待同步条数"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+    client = get_feishu_client()
+    if not client:
+        return jsonify({"error": "Token 无效"}), 401
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return jsonify({"error": "群聊未配置"}), 404
+
+    try:
+        total = client.get_chat_message_count(chat_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    synced = chat_config.get("record_count", 0) or 0
+    last_pos = chat_config.get("last_synced_position", 0) or 0
+    # 待同步 = 群里消息总数 - 已同步到的位置
+    pending = max(0, total - last_pos)
+    return jsonify({
+        "total": total,
+        "synced": synced,
+        "pending": pending,
+    })
+
 @app.route("/api/chats", methods=["POST"])
 def api_add_chat():
     user = get_current_user()
@@ -432,6 +461,30 @@ INDEX_PAGE = """
                 btn.textContent = '同步';
             }
         }
+
+        // 页面加载后实时查询每个群的待同步条数
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.stats').forEach(async (el) => {
+                const chatId = el.dataset.chatId;
+                if (!chatId) return;
+                try {
+                    const resp = await fetch('/api/chat_stats/' + chatId);
+                    const data = await resp.json();
+                    if (data.error) {
+                        el.textContent = '| ' + data.error;
+                        return;
+                    }
+                    const total = data.total || 0;
+                    const synced = data.synced || 0;
+                    const pending = data.pending || 0;
+                    const parts = ['| 已同步 ' + synced + ' / ' + total + ' 条'];
+                    if (pending > 0) parts.push('待同步 ' + pending + ' 条');
+                    el.textContent = parts.join(' ');
+                } catch (e) {
+                    // 查询失败保持原状
+                }
+            });
+        });
 
         document.getElementById('chatIdInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') addChat();

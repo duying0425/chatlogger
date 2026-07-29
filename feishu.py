@@ -110,13 +110,13 @@ class FeishuClient:
 
     # ===== 消息读取 =====
 
-    def list_messages(self, chat_id, page_size=50, page_token=None):
+    def list_messages(self, chat_id, page_size=50, page_token=None, sort_type="ByCreateTimeAsc"):
         """获取群聊消息（一页）"""
         params = {
             "container_id": chat_id,
             "container_id_type": "chat",
             "page_size": page_size,
-            "sort_type": "ByCreateTimeAsc",
+            "sort_type": sort_type,
         }
         if page_token:
             params["page_token"] = page_token
@@ -124,6 +124,14 @@ class FeishuClient:
         if data.get("code") != 0:
             raise Exception(f"获取消息失败: {data}")
         return data["data"]
+
+    def get_chat_message_count(self, chat_id):
+        """获取群消息总数（取按时间倒序的第一条 message_position）"""
+        data = self.list_messages(chat_id, page_size=1, sort_type="ByCreateTimeDesc")
+        items = data.get("items", [])
+        if not items:
+            return 0
+        return int(items[0].get("message_position") or 0)
 
     def list_all_messages(self, chat_id, start_position=0):
         """获取群聊全部消息（自动分页），从指定位置开始"""
