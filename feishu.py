@@ -214,9 +214,9 @@ class FeishuClient:
 
         return base_token, default_table_id, base_url
 
-    def _api_put(self, path, json_data=None):
+    def _api_put(self, path, json=None):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.put(url, headers=self._headers(), json=json_data)
+        resp = requests.put(url, headers=self._headers(), json=json)
         return resp.json()
 
     def batch_create_records(self, base_token, table_id, records):
