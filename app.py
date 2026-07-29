@@ -436,6 +436,17 @@ INDEX_PAGE = """
         </div>
     </div>
     <div class="toast" id="toast"></div>
+    <div class="modal-mask" id="deleteModal">
+        <div class="modal">
+            <h3>删除群聊配置</h3>
+            <p>请选择删除方式：<br>「仅删配置」：飞书多维表格中的数据会保留。<br>「同时删表格」：将一并删除已同步的飞书多维表格，此操作不可恢复。</p>
+            <div class="modal-btns">
+                <button class="btn-cancel" onclick="closeDeleteModal()">取消</button>
+                <button class="btn-only-config" onclick="doDelete(false)">仅删配置</button>
+                <button class="btn-delete-all" onclick="doDelete(true)">同时删表格</button>
+            </div>
+        </div>
+    </div>
     <script>
         function showToast(msg, type) {
             const toast = document.getElementById('toast');
