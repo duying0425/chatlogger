@@ -278,7 +278,11 @@ def api_sync(chat_id):
                 msg_resources[m["message_id"]] = resources
 
         # 6. 批量写入记录
+        print(f"[DEBUG] 准备写入 {len(records)} 条记录，前3条样本:")
+        for i, r in enumerate(records[:3]):
+            print(f"  [{i}] {r}")
         record_ids = client.batch_create_records(base_token, table_id, records)
+        print(f"[DEBUG] 写入完成，返回 {len(record_ids)} 个 record_id")
 
         # 7. 下载并上传附件
         attach_count = 0
