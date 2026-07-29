@@ -177,11 +177,18 @@ class FeishuClient:
             raise SizeExceededError(f"附件 {content_length // 1024 // 1024}MB 超过 {max_size_mb}MB 限制")
         # 获取文件名
         content_disp = resp.headers.get("Content-Disposition", "")
-        filename = file_key
+        filename = ""
         if content_disp:
             match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";\n]+)"?', content_disp)
             if match:
                 filename = match.group(1)
+        # 飞书图片资源下载接口通常不返回文件名，根据类型补扩展名
+        # 否则多维表格无法识别图片格式进行预览
+        if not filename:
+            filename = file_key
+        if resource_type == "image" and "." not in filename.rsplit("/", 1)[-1]:
+            # 飞书消息里的图片资源都是 jpeg
+            filename = filename + ".jpg"
         return resp.content, filename
 
     # ===== 多维表格操作 =====
