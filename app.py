@@ -179,6 +179,20 @@ def api_delete_chat(chat_id):
     user = get_current_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
+
+    # query 参数 delete_base=true 时同时删除飞书多维表格
+    delete_base = request.args.get("delete_base") == "true"
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if delete_base and chat_config and chat_config.get("base_token"):
+        client = get_feishu_client()
+        if client:
+            try:
+                client.delete_bitable(chat_config["base_token"])
+            except Exception as e:
+                # 表格删除失败不阻断配置删除，仅返回警告
+                return jsonify({"error": f"删除飞书表格失败: {e}"}), 500
+
     models.delete_chat(user["id"], chat_id)
     return jsonify({"ok": True})
 
@@ -369,6 +383,19 @@ INDEX_PAGE = """
         .toast.success { background: #00b42a; }
         .toast.error { background: #f53f3f; }
         .toast.show { opacity: 1; }
+        .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; justify-content: center; align-items: center; z-index: 1000; }
+        .modal-mask.show { display: flex; }
+        .modal { background: white; border-radius: 12px; padding: 28px 32px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
+        .modal h3 { font-size: 17px; margin-bottom: 8px; }
+        .modal p { font-size: 13px; color: #646a73; margin-bottom: 20px; line-height: 1.6; }
+        .modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
+        .modal-btns button { padding: 8px 18px; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
+        .modal-btns .btn-cancel { background: #f2f3f5; color: #4e5969; }
+        .modal-btns .btn-cancel:hover { background: #e5e6eb; }
+        .modal-btns .btn-only-config { background: #3370ff; color: white; }
+        .modal-btns .btn-only-config:hover { background: #2860e1; }
+        .modal-btns .btn-delete-all { background: #f53f3f; color: white; }
+        .modal-btns .btn-delete-all:hover { background: #d93636; }
     </style>
 </head>
 <body>
@@ -431,12 +458,29 @@ INDEX_PAGE = """
             else { showToast(data.error || '添加失败', 'error'); }
         }
 
-        async function deleteChat(chatId) {
-            if (!confirm('确认删除该群聊配置？多维表格中的数据不会被删除。')) return;
-            const resp = await fetch('/api/chats/' + chatId, { method: 'DELETE' });
-            const data = await resp.json();
-            if (data.ok) { location.reload(); }
-            else { showToast(data.error || '删除失败', 'error'); }
+        let pendingDeleteChatId = null;
+        function deleteChat(chatId) {
+            pendingDeleteChatId = chatId;
+            document.getElementById('deleteModal').classList.add('show');
+        }
+        function closeDeleteModal() {
+            pendingDeleteChatId = null;
+            document.getElementById('deleteModal').classList.remove('show');
+        }
+        async function doDelete(deleteBase) {
+            const chatId = pendingDeleteChatId;
+            if (!chatId) return;
+            const url = '/api/chats/' + chatId + (deleteBase ? '?delete_base=true' : '');
+            try {
+                const resp = await fetch(url, { method: 'DELETE' });
+                const data = await resp.json();
+                if (data.ok) { location.reload(); }
+                else { showToast(data.error || '删除失败', 'error'); }
+            } catch (e) {
+                showToast('网络错误', 'error');
+            } finally {
+                closeDeleteModal();
+            }
         }
 
         async function syncChat(chatId, btn) {

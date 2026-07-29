@@ -245,6 +245,13 @@ class FeishuClient:
         resp = requests.delete(url, headers=self._headers())
         return resp.json()
 
+    def delete_bitable(self, base_token):
+        """删除多维表格"""
+        data = self._api_delete(f"/bitable/v1/apps/{base_token}")
+        if data.get("code") != 0:
+            raise Exception(f"删除多维表格失败: {data}")
+        return True
+
     def batch_create_records(self, base_token, table_id, records):
         """批量创建记录，每批最多 500 条"""
         all_record_ids = []
