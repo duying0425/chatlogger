@@ -135,7 +135,8 @@ class FeishuClient:
             # 按消息位置过滤已同步的
             new_msgs = []
             for m in msgs:
-                pos = int(m.get("position", 0))
+                # 飞书返回字段是 message_position（字符串），缺失时用 0
+                pos = int(m.get("message_position") or 0)
                 if pos > start_position:
                     new_msgs.append(m)
             all_messages.extend(new_msgs)
@@ -144,7 +145,7 @@ class FeishuClient:
             page_token = data.get("page_token")
             if not page_token:
                 break
-        all_messages.sort(key=lambda m: int(m.get("position", 0)))
+        all_messages.sort(key=lambda m: int(m.get("message_position") or 0))
         return all_messages
 
     # ===== 资源下载 =====

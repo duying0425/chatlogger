@@ -248,7 +248,7 @@ def api_sync(chat_id):
                     print(f"附件上传失败: {e}")
 
         # 8. 更新同步状态
-        new_last_position = int(messages[-1].get("position", 0))
+        new_last_position = int(messages[-1].get("message_position") or 0)
         new_record_count = (chat_config.get("record_count", 0) or 0) + len(messages)
         models.update_chat_sync_status(user["id"], chat_id, new_last_position, new_record_count)
 
