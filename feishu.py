@@ -5,6 +5,11 @@ import io
 from config import Config
 
 
+class SizeExceededError(Exception):
+    """附件超过大小限制"""
+    pass
+
+
 class FeishuClient:
     """飞书 OpenAPI 客户端，使用 user_access_token 调用"""
 
@@ -158,13 +163,18 @@ class FeishuClient:
 
     # ===== 资源下载 =====
 
-    def download_resource(self, message_id, file_key, resource_type="image"):
-        """下载消息中的图片或文件，返回字节流"""
+    def download_resource(self, message_id, file_key, resource_type="image", max_size_mb=20):
+        """下载消息中的图片或文件，返回字节流。
+        超过 max_size_mb 则抛出 SizeExceededError（飞书 upload_all 限制 20MB）。"""
         url = f"{Config.API_BASE}/im/v1/messages/{message_id}/resources/{file_key}"
         params = {"type": resource_type}
+        # 先 HEAD 请求拿大小（飞书资源接口支持 Content-Length）
         resp = requests.get(url, headers=self._headers(), params=params, stream=True)
         if resp.status_code != 200:
             raise Exception(f"下载资源失败: HTTP {resp.status_code}")
+        content_length = int(resp.headers.get("Content-Length", 0))
+        if content_length > max_size_mb * 1024 * 1024:
+            raise SizeExceededError(f"附件 {content_length // 1024 // 1024}MB 超过 {max_size_mb}MB 限制")
         # 获取文件名
         content_disp = resp.headers.get("Content-Disposition", "")
         filename = file_key

@@ -9,6 +9,7 @@ from feishu import (
     process_message_content,
     extract_resource_keys,
     get_sender_name,
+    SizeExceededError,
 )
 
 app = Flask(__name__)
@@ -286,6 +287,7 @@ def api_sync(chat_id):
 
         # 7. 下载并上传附件
         attach_count = 0
+        skipped_count = 0
         for i, m in enumerate(messages):
             msg_id = m["message_id"]
             resources = msg_resources.get(msg_id, [])
@@ -305,6 +307,9 @@ def api_sync(chat_id):
                         base_token, table_id, record_id, "附件", file_token
                     )
                     attach_count += 1
+                except SizeExceededError as e:
+                    skipped_count += 1
+                    print(f"[跳过大附件] {e}")
                 except Exception as e:
                     # 附件上传失败不中断整体流程
                     print(f"附件上传失败: {e}")
@@ -322,6 +327,7 @@ def api_sync(chat_id):
             "ok": True,
             "new_count": len(messages),
             "attach_count": attach_count,
+            "skipped_count": skipped_count,
             "total_records": new_record_count,
             "base_url": base_url,
         })
@@ -517,7 +523,8 @@ INDEX_PAGE = """
                 const data = await resp.json();
                 if (data.ok) {
                     const msg = '同步成功：新增 ' + data.new_count + ' 条消息' +
-                        (data.attach_count > 0 ? '，附件 ' + data.attach_count + ' 个' : '');
+                        (data.attach_count > 0 ? '，附件 ' + data.attach_count + ' 个' : '') +
+                        (data.skipped_count > 0 ? '，跳过大附件 ' + data.skipped_count + ' 个' : '');
                     showToast(msg, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
