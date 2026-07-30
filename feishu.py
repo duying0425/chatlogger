@@ -240,8 +240,9 @@ class FeishuClient:
 
         # 创建字段：发言人（人员类型，飞书自动显示姓名+头像）、时间、附件
         # 发言人用人员字段，写入 open_id 后飞书自动解析为姓名，无需通讯录权限
+        # 注意：人员字段 type=11 不能传 property，否则报 UserFieldPropertiesError
         field_defs = [
-            {"field_name": "发言人", "type": 11, "property": {"auto_rollback": True}},
+            {"field_name": "发言人", "type": 11},
             {"field_name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
             {"field_name": "附件", "type": 17},
         ]

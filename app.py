@@ -332,7 +332,7 @@ def _run_sync(user_id, chat_id):
         # 自动补建缺失字段（兼容旧表）
         try:
             client.ensure_fields(base_token, table_id, [
-                {"name": "发言人", "type": 11, "property": {"auto_rollback": True}},
+                {"name": "发言人", "type": 11},
                 {"name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
                 {"name": "消息内容", "type": 1},
                 {"name": "附件", "type": 17},
