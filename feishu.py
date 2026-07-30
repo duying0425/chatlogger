@@ -2,12 +2,72 @@ import requests
 import time
 import re
 import io
+import threading
 from config import Config
 
 
 class SizeExceededError(Exception):
     """附件超过大小限制"""
     pass
+
+
+# 飞书 API 错误码：限流 / 服务过载（可重试）
+RETRYABLE_API_CODES = {99991663, 99991664}
+# HTTP 状态码：可重试（限流 + 服务端错误）
+RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
+
+# 全局 token 刷新锁：飞书 refresh_token 一次性，
+# 并发刷新会导致后续请求报 20073（refresh token has been used）
+_token_refresh_lock = threading.Lock()
+
+
+def _request_with_retry(request_fn, parse_json=True, max_retries=3):
+    """执行 requests 调用并对瞬时错误做指数退避重试。
+
+    可重试：网络错误、HTTP 429/5xx、飞书业务码 99991663/99991664
+    不重试：业务错误、4xx（除 429）、其他业务码
+
+    request_fn: 无参数 callable，返回 requests.Response
+    parse_json: 是否解析响应为 json 并检查飞书业务码（stream 下载设为 False）
+    """
+    last_resp = None
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = request_fn()
+            last_resp = resp
+            # HTTP 层判断
+            if resp.status_code in RETRYABLE_HTTP_STATUS:
+                last_exc = Exception(f"HTTP {resp.status_code}")
+                if attempt < max_retries:
+                    time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s, 2s
+                    continue
+                return resp  # 重试耗尽，返回错误响应
+            # 业务层判断（仅 json 响应）
+            if parse_json:
+                ctype = resp.headers.get('content-type', '')
+                if ctype.startswith('application/json'):
+                    try:
+                        data = resp.json()
+                        code = data.get("code")
+                        if code in RETRYABLE_API_CODES:
+                            last_exc = Exception(f"飞书限流 code={code}")
+                            if attempt < max_retries:
+                                time.sleep(0.5 * (2 ** attempt))
+                                continue
+                    except ValueError:
+                        pass  # 解析失败，交给调用方处理
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            raise
+    # 重试耗尽
+    if last_exc:
+        raise last_exc
+    return last_resp
 
 
 class FeishuClient:
@@ -29,31 +89,41 @@ class FeishuClient:
         self._refresh_access_token()
 
     def _refresh_access_token(self):
-        """刷新 user_access_token"""
-        resp = requests.post(Config.TOKEN_URL, json={
-            "grant_type": "refresh_token",
-            "client_id": Config.FEISHU_APP_ID,
-            "client_secret": Config.FEISHU_APP_SECRET,
-            "refresh_token": self.refresh_token,
-        })
-        data = resp.json()
-        if data.get("code") != 0:
-            raise Exception(f"刷新 token 失败: {data}")
+        """刷新 user_access_token。
+        飞书 refresh_token 一次性，并发刷新会互相覆盖导致 20073 错误，
+        用全局锁串行化。同一进程内多个线程同时触发刷新时，
+        第一个完成后，后续线程检测 token 已更新就跳过。"""
+        # 双重检查：拿到锁之前可能已有线程刷新成功
+        if time.time() < self.token_expires_at - 300:
+            return
+        with _token_refresh_lock:
+            # 再次检查：拿到锁后可能已被其他线程刷新
+            if time.time() < self.token_expires_at - 300:
+                return
+            resp = requests.post(Config.TOKEN_URL, json={
+                "grant_type": "refresh_token",
+                "client_id": Config.FEISHU_APP_ID,
+                "client_secret": Config.FEISHU_APP_SECRET,
+                "refresh_token": self.refresh_token,
+            })
+            data = resp.json()
+            if data.get("code") != 0:
+                raise Exception(f"刷新 token 失败: {data}")
 
-        self.access_token = data["access_token"]
-        self.refresh_token = data["refresh_token"]
-        self.token_expires_at = time.time() + data["expires_in"]
-        self.refresh_expires_at = time.time() + data["refresh_token_expires_in"]
+            self.access_token = data["access_token"]
+            self.refresh_token = data["refresh_token"]
+            self.token_expires_at = time.time() + data["expires_in"]
+            self.refresh_expires_at = time.time() + data["refresh_token_expires_in"]
 
-        # 持久化新 token
-        import models
-        models.update_user_tokens(
-            self.user_id,
-            self.access_token,
-            self.refresh_token,
-            data["expires_in"],
-            data["refresh_token_expires_in"],
-        )
+            # 持久化新 token
+            import models
+            models.update_user_tokens(
+                self.user_id,
+                self.access_token,
+                self.refresh_token,
+                data["expires_in"],
+                data["refresh_token_expires_in"],
+            )
 
     def _headers(self):
         self._ensure_token()
@@ -61,12 +131,12 @@ class FeishuClient:
 
     def _api_get(self, path, params=None):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.get(url, headers=self._headers(), params=params)
+        resp = _request_with_retry(lambda: requests.get(url, headers=self._headers(), params=params))
         return resp.json()
 
     def _api_post(self, path, json=None):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.post(url, headers=self._headers(), json=json)
+        resp = _request_with_retry(lambda: requests.post(url, headers=self._headers(), json=json))
         return resp.json()
 
     # ===== OAuth 静态方法 =====
@@ -169,8 +239,11 @@ class FeishuClient:
         文件名优先级：original_filename > Content-Disposition > file_key + 扩展名"""
         url = f"{Config.API_BASE}/im/v1/messages/{message_id}/resources/{file_key}"
         params = {"type": resource_type}
-        # 先 HEAD 请求拿大小（飞书资源接口支持 Content-Length）
-        resp = requests.get(url, headers=self._headers(), params=params, stream=True)
+        # stream 下载：parse_json=False 让重试逻辑只判断 HTTP 状态码
+        resp = _request_with_retry(
+            lambda: requests.get(url, headers=self._headers(), params=params, stream=True),
+            parse_json=False,
+        )
         if resp.status_code != 200:
             raise Exception(f"下载资源失败: HTTP {resp.status_code}")
         content_length = int(resp.headers.get("Content-Length", 0))
@@ -239,13 +312,14 @@ class FeishuClient:
                     f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{field['field_id']}"
                 )
 
-        # 创建字段：发言人（人员，飞书自动解析 open_id 显示姓名+头像）、时间、消息内容、附件、备注
+        # 创建字段：发言人（人员，飞书自动解析 open_id 显示姓名+头像）、时间、消息内容、附件、消息ID、备注
         # 注意：人员字段 type=11 不能传 property，否则报 UserFieldPropertiesError
         field_defs = [
             {"field_name": "发言人", "type": 11},
             {"field_name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
             {"field_name": "消息内容", "type": 1},
             {"field_name": "附件", "type": 17},
+            {"field_name": "消息ID", "type": 1},
             {"field_name": "备注", "type": 1},
         ]
         for fd in field_defs:
@@ -268,41 +342,52 @@ class FeishuClient:
 
     def _api_put(self, path, json=None):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.put(url, headers=self._headers(), json=json)
+        resp = _request_with_retry(lambda: requests.put(url, headers=self._headers(), json=json))
         return resp.json()
 
     def _api_patch(self, path, json=None):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.patch(url, headers=self._headers(), json=json)
+        resp = _request_with_retry(lambda: requests.patch(url, headers=self._headers(), json=json))
         return resp.json()
 
     def _api_delete(self, path):
         url = f"{Config.API_BASE}{path}"
-        resp = requests.delete(url, headers=self._headers())
+        resp = _request_with_retry(lambda: requests.delete(url, headers=self._headers()))
         return resp.json()
 
     def delete_bitable(self, base_token):
         """删除多维表格（走云文档接口，type=bitable）"""
         url = f"{Config.API_BASE}/drive/v1/files/{base_token}"
-        resp = requests.delete(url, headers=self._headers(), params={"type": "bitable"})
+        resp = _request_with_retry(
+            lambda: requests.delete(url, headers=self._headers(), params={"type": "bitable"})
+        )
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"删除多维表格失败: {data}")
         return True
 
-    def batch_create_records(self, base_token, table_id, records):
-        """批量创建记录，每批最多 500 条。"""
+    def batch_create_records(self, base_token, table_id, records, on_batch_done=None):
+        """批量创建记录，每批最多 500 条。
+
+        on_batch_done(batch_index, batch_records, record_ids):
+            每批成功后的回调，用于即时保存进度到数据库，
+            避免后续批次失败导致已写入的记录下次同步重复写入。
+        """
         all_record_ids = []
         for i in range(0, len(records), 500):
+            batch_idx = i // 500
             batch = records[i:i + 500]
             data = self._api_post(
                 f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_create",
                 json={"records": [{"fields": r} for r in batch]},
             )
             if data.get("code") != 0:
-                raise Exception(f"批量创建记录失败: {data}")
-            for rec in data["data"]["records"]:
-                all_record_ids.append(rec["record_id"])
+                raise Exception(f"批量创建记录失败（第 {batch_idx + 1} 批，{len(batch)} 条）: {data}")
+            batch_ids = [rec["record_id"] for rec in data["data"]["records"]]
+            all_record_ids.extend(batch_ids)
+            # 即时保存进度，避免后续失败导致重复写入
+            if on_batch_done:
+                on_batch_done(batch_idx, batch, batch_ids)
         return all_record_ids
 
     def upload_file(self, base_token, file_content, filename):
@@ -316,7 +401,7 @@ class FeishuClient:
             "size": (None, str(len(file_content))),
             "file": (filename, file_content),
         }
-        resp = requests.post(url, headers=self._headers(), files=files)
+        resp = _request_with_retry(lambda: requests.post(url, headers=self._headers(), files=files))
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"上传文件失败: {data}")

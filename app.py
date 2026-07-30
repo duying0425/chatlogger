@@ -163,7 +163,11 @@ def api_chat_stats(chat_id):
     try:
         total = client.get_chat_message_count(chat_id)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        err_str = str(e)
+        # token 失效友好提示
+        if "20073" in err_str or "invalid_grant" in err_str or "Token 已过期且无法刷新" in err_str:
+            return jsonify({"error": "登录已失效，请重新登录"}), 401
+        return jsonify({"error": err_str}), 500
 
     synced = chat_config.get("record_count", 0) or 0
     last_pos = chat_config.get("last_synced_position", 0) or 0
@@ -391,11 +395,36 @@ def _run_sync(user_id, chat_id):
                 _set_progress(chat_id, stage="preparing_records", current=idx + 1, total=total,
                               message=f"准备记录数据 ({idx + 1}/{total})...")
 
-        # 6. 批量写入记录
+        # 6. 批量写入记录（每批成功后即时保存进度，防止后续失败导致重复写入）
         _set_progress(chat_id, stage="writing_records", current=0, total=total,
                       message=f"写入多维表格 (0/{total})...")
         print(f"[DEBUG] 准备写入 {len(records)} 条记录")
-        record_ids = client.batch_create_records(base_token, table_id, records)
+        # 记录已写入数量与最后一条消息的 position，每批成功后立即落库
+        written_count = [0]  # 用 list 闭包可变
+        written_last_pos = [last_position]
+        # 消息在 records 中按原 messages 顺序对应，每批 batch_size=500
+        batch_size = 500
+
+        def _on_batch_done(batch_idx, batch_records, batch_ids):
+            # batch_records 对应 messages[start_idx : start_idx+len(batch_records)]
+            start_idx = batch_idx * batch_size
+            end_idx = start_idx + len(batch_records)
+            # 飞书 message_position 可能缺失，兜底用 start_seq+end_idx-1
+            last_msg = messages[end_idx - 1] if end_idx - 1 < total else messages[-1]
+            last_pos = int(last_msg.get("message_position") or 0)
+            new_count = (chat_config.get("record_count", 0) or 0) + end_idx
+            try:
+                models.update_chat_sync_status(user["id"], chat_id, last_pos, new_count)
+            except Exception as e:
+                print(f"[WARN] 即时保存进度失败（不阻断同步）: {e}")
+            written_count[0] = end_idx
+            written_last_pos[0] = last_pos
+            _set_progress(chat_id, stage="writing_records", current=end_idx, total=total,
+                          message=f"写入多维表格 ({end_idx}/{total})...")
+
+        record_ids = client.batch_create_records(
+            base_token, table_id, records, on_batch_done=_on_batch_done
+        )
         print(f"[DEBUG] 写入完成，返回 {len(record_ids)} 个 record_id")
         _set_progress(chat_id, stage="records_written", current=total, total=total,
                       message=f"记录写入完成 ({len(record_ids)} 条)")
@@ -427,15 +456,30 @@ def _run_sync(user_id, chat_id):
 
             for r in resources:
                 try:
-                    file_content, filename = client.download_resource(
-                        r["message_id"], r["file_key"], r["type"],
-                        original_filename=r.get("file_name", "")
-                    )
-                    file_token = client.upload_file(base_token, file_content, filename)
-                    client.upload_attachment_to_record(
-                        base_token, table_id, record_id, "附件", file_token
-                    )
-                    attach_count += 1
+                    # 单个附件失败重试 1 次（瞬时网络抖动）
+                    # SizeExceededError 不重试（业务错误，重试也必失败）
+                    last_err = None
+                    for attempt in range(2):  # 0=首次, 1=重试
+                        try:
+                            file_content, filename = client.download_resource(
+                                r["message_id"], r["file_key"], r["type"],
+                                original_filename=r.get("file_name", "")
+                            )
+                            file_token = client.upload_file(base_token, file_content, filename)
+                            client.upload_attachment_to_record(
+                                base_token, table_id, record_id, "附件", file_token
+                            )
+                            attach_count += 1
+                            last_err = None
+                            break
+                        except SizeExceededError:
+                            raise  # 直接走外层 except
+                        except Exception as e:
+                            last_err = e
+                            if attempt == 0:
+                                time.sleep(0.5)
+                    if last_err:
+                        raise last_err
                 except SizeExceededError as e:
                     skipped_count += 1
                     # 记录跳过说明：包含文件名和原因
@@ -487,8 +531,16 @@ def _run_sync(user_id, chat_id):
 
     except Exception as e:
         print(f"[SYNC ERROR] {traceback.format_exc()}")
-        _set_progress(chat_id, stage="error", running=False, error=str(e),
-                      message=f"同步失败: {e}")
+        err_str = str(e)
+        # token 失效友好提示：refresh_token 一次性被用掉 / 已过期
+        if "20073" in err_str or "invalid_grant" in err_str:
+            friendly = "登录已失效，请重新登录后再同步"
+        elif "Token 已过期且无法刷新" in err_str:
+            friendly = "登录已过期，请重新登录后再同步"
+        else:
+            friendly = f"同步失败: {e}"
+        _set_progress(chat_id, stage="error", running=False, error=friendly,
+                      message=friendly)
 
 
 # ===== 页面模板 =====
