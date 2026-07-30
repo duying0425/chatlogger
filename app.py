@@ -337,6 +337,7 @@ def _run_sync(user_id, chat_id):
                 {"name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
                 {"name": "消息内容", "type": 1},
                 {"name": "附件", "type": 17},
+                {"name": "备注", "type": 1},
             ])
         except Exception as e:
             print(f"[ensure_fields] 补建字段失败（继续尝试）: {e}")
@@ -422,7 +423,7 @@ def _run_sync(user_id, chat_id):
                     # 记录跳过说明：包含文件名和原因
                     fname = r.get("file_name") or r.get("file_key", "")
                     ftype = "图片" if r.get("type") == "image" else "文件"
-                    note = f"\n[跳过{ftype}：{fname}（{e}）]"
+                    note = f"[跳过{ftype}：{fname}（{e}）]"
                     skipped_notes.setdefault(record_id, []).append(note)
                     print(f"[跳过大附件] {e}")
                 except Exception as e:
@@ -433,15 +434,15 @@ def _run_sync(user_id, chat_id):
                                  current=attach_done, total=total_attach_tasks,
                                  message=f"上传附件 ({attach_done}/{total_attach_tasks})...")
 
-        # 7.5 把跳过说明追加到对应记录的「消息内容」字段
+        # 7.5 把跳过说明写入「备注」字段（不污染消息内容或附件列）
         if skipped_notes:
             for rid, notes in skipped_notes.items():
                 try:
-                    client.append_text_to_record(
-                        base_token, table_id, rid, "消息内容", "".join(notes)
+                    client.update_record_field(
+                        base_token, table_id, rid, "备注", " ".join(notes)
                     )
                 except Exception as e:
-                    print(f"[追加跳过说明失败] {e}")
+                    print(f"[写入跳过说明失败] {e}")
 
         # 8. 更新同步状态
         new_last_position = int(messages[-1].get("message_position") or 0)

@@ -239,13 +239,14 @@ class FeishuClient:
                     f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{field['field_id']}"
                 )
 
-        # 创建字段：发言人（人员，飞书自动解析 open_id 显示姓名+头像）、时间、消息内容、附件
+        # 创建字段：发言人（人员，飞书自动解析 open_id 显示姓名+头像）、时间、消息内容、附件、备注
         # 注意：人员字段 type=11 不能传 property，否则报 UserFieldPropertiesError
         field_defs = [
             {"field_name": "发言人", "type": 11},
             {"field_name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
             {"field_name": "消息内容", "type": 1},
             {"field_name": "附件", "type": 17},
+            {"field_name": "备注", "type": 1},
         ]
         for fd in field_defs:
             self._api_post(
@@ -345,20 +346,16 @@ class FeishuClient:
         )
         return update_data.get("code") == 0
 
-    def append_text_to_record(self, base_token, table_id, record_id, field_name, append_text):
-        """在指定文本字段末尾追加内容（用于大附件跳过时在消息内容里加说明）。
-        会先读取当前字段值，合并后再 PUT 写回（PUT 会覆盖全部字段）。"""
+    def update_record_field(self, base_token, table_id, record_id, field_name, value):
+        """更新单条记录的指定字段（不影响其他字段）。
+        飞书 PUT 会覆盖所有字段，所以需先读全部字段再合并目标字段值。"""
         data = self._api_get(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}"
         )
         if data.get("code") != 0:
             return False
         all_fields = data["data"]["record"]["fields"]
-        existing = all_fields.get(field_name, "") or ""
-        # 文本字段可能返回 [{"type":"text","text":"..."}] 结构，简化处理：提取纯文本
-        if isinstance(existing, list):
-            existing = "".join(seg.get("text", "") for seg in existing if isinstance(seg, dict))
-        all_fields[field_name] = str(existing) + append_text
+        all_fields[field_name] = value
         update_data = self._api_put(
             f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}",
             json={"fields": all_fields},
