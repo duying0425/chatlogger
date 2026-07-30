@@ -220,17 +220,18 @@ class FeishuClient:
             "name": table_name,
         })
 
-        # 4. 整理字段：首个默认字段（主键，不可删除）改名为「消息内容」（文本类型），
-        #    其余默认字段删除后新建：发言人（人员）、时间（日期）、附件
+        # 4. 整理字段：首个默认字段（主键，不可删除）改名为「序号」（文本类型，存行号），
+        #    其余默认字段删除后新建：发言人（人员）、时间、消息内容、附件
+        #    注意：飞书主字段必须是文本类型，不能改成人员或自动编号
         fields_data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields")
         if fields_data.get("code") == 0:
             items = fields_data["data"]["items"]
-            # 主字段改名为「消息内容」（主字段必须是文本类型，不能改成人员）
+            # 主字段改名为「序号」
             if items:
                 primary = items[0]
                 self._api_put(
                     f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{primary['field_id']}",
-                    json={"field_name": "消息内容", "type": primary.get("type", 1)},
+                    json={"field_name": "序号", "type": primary.get("type", 1)},
                 )
             # 删除其余默认字段
             for field in items[1:]:
@@ -238,13 +239,12 @@ class FeishuClient:
                     f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{field['field_id']}"
                 )
 
-        # 创建字段：发言人（人员，飞书自动显示姓名+头像）、发言人ID（文本，兜底）、时间、附件
-        # 发言人用人员字段，写入 open_id 后飞书自动解析为姓名，无需通讯录权限
+        # 创建字段：发言人（人员，飞书自动解析 open_id 显示姓名+头像）、时间、消息内容、附件
         # 注意：人员字段 type=11 不能传 property，否则报 UserFieldPropertiesError
         field_defs = [
             {"field_name": "发言人", "type": 11},
-            {"field_name": "发言人ID", "type": 1},
             {"field_name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
+            {"field_name": "消息内容", "type": 1},
             {"field_name": "附件", "type": 17},
         ]
         for fd in field_defs:

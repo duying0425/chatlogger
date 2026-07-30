@@ -332,14 +332,16 @@ def _run_sync(user_id, chat_id):
         # 自动补建缺失字段（兼容旧表）
         try:
             client.ensure_fields(base_token, table_id, [
+                {"name": "序号", "type": 1},
                 {"name": "发言人", "type": 11},
-                {"name": "发言人ID", "type": 1},
                 {"name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
                 {"name": "消息内容", "type": 1},
                 {"name": "附件", "type": 17},
             ])
         except Exception as e:
             print(f"[ensure_fields] 补建字段失败（继续尝试）: {e}")
+        # 序号从已有记录数 + 1 开始
+        start_seq = (chat_config.get("record_count", 0) or 0) + 1
         _set_progress(chat_id, stage="preparing_records", current=0, total=total,
                       message=f"准备记录数据 (0/{total})...")
         records = []
@@ -354,8 +356,8 @@ def _run_sync(user_id, chat_id):
             content = process_message_content(m)
 
             record = {
+                "序号": str(start_seq + idx),
                 "发言人": [{"id": sender_id}] if sender_id else [],
-                "发言人ID": sender_id or "",
                 "时间": date_value,
                 "消息内容": content,
             }
