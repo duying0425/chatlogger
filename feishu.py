@@ -345,6 +345,26 @@ class FeishuClient:
         )
         return update_data.get("code") == 0
 
+    def append_text_to_record(self, base_token, table_id, record_id, field_name, append_text):
+        """在指定文本字段末尾追加内容（用于大附件跳过时在消息内容里加说明）。
+        会先读取当前字段值，合并后再 PUT 写回（PUT 会覆盖全部字段）。"""
+        data = self._api_get(
+            f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}"
+        )
+        if data.get("code") != 0:
+            return False
+        all_fields = data["data"]["record"]["fields"]
+        existing = all_fields.get(field_name, "") or ""
+        # 文本字段可能返回 [{"type":"text","text":"..."}] 结构，简化处理：提取纯文本
+        if isinstance(existing, list):
+            existing = "".join(seg.get("text", "") for seg in existing if isinstance(seg, dict))
+        all_fields[field_name] = str(existing) + append_text
+        update_data = self._api_put(
+            f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}",
+            json={"fields": all_fields},
+        )
+        return update_data.get("code") == 0
+
     def get_field_id(self, base_token, table_id, field_name):
         """获取指定字段名的 field_id"""
         data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{table_id}/fields")

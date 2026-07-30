@@ -384,6 +384,9 @@ def _run_sync(user_id, chat_id):
         # 7. 下载并上传附件
         attach_count = 0
         skipped_count = 0
+        # 记录每条消息被跳过的附件说明，后续批量追加到「消息内容」字段
+        # 结构：record_id -> [说明1, 说明2, ...]
+        skipped_notes = {}
         # 计算附件总数（用于进度展示）
         total_attach_tasks = sum(len(msg_resources.get(m["message_id"], [])) for m in messages)
         if total_attach_tasks > 0:
@@ -416,6 +419,11 @@ def _run_sync(user_id, chat_id):
                     attach_count += 1
                 except SizeExceededError as e:
                     skipped_count += 1
+                    # 记录跳过说明：包含文件名和原因
+                    fname = r.get("file_name") or r.get("file_key", "")
+                    ftype = "图片" if r.get("type") == "image" else "文件"
+                    note = f"\n[跳过{ftype}：{fname}（{e}）]"
+                    skipped_notes.setdefault(record_id, []).append(note)
                     print(f"[跳过大附件] {e}")
                 except Exception as e:
                     print(f"附件上传失败: {e}")
@@ -424,6 +432,16 @@ def _run_sync(user_id, chat_id):
                     _set_progress(chat_id, stage="uploading_attachments",
                                  current=attach_done, total=total_attach_tasks,
                                  message=f"上传附件 ({attach_done}/{total_attach_tasks})...")
+
+        # 7.5 把跳过说明追加到对应记录的「消息内容」字段
+        if skipped_notes:
+            for rid, notes in skipped_notes.items():
+                try:
+                    client.append_text_to_record(
+                        base_token, table_id, rid, "消息内容", "".join(notes)
+                    )
+                except Exception as e:
+                    print(f"[追加跳过说明失败] {e}")
 
         # 8. 更新同步状态
         new_last_position = int(messages[-1].get("message_position") or 0)
