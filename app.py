@@ -349,7 +349,7 @@ def _run_sync(user_id, chat_id):
         msg_resources = {}
         for idx, m in enumerate(messages):
             sender_id = m.get("sender", {}).get("id", "")
-            sender_type = m.get("sender", {}).get("sender_type", "")
+            msg_type = m.get("msg_type", "")
             create_time = m.get("create_time")
             try:
                 date_value = int(create_time)
@@ -357,16 +357,21 @@ def _run_sync(user_id, chat_id):
                 date_value = None
             content = process_message_content(m)
 
-            # 发言人：只有用户消息（ou_ 开头的 open_id）才能写入人员字段
-            # 应用/机器人消息的 sender.id 是 cli_ 开头的应用 ID，不能写入人员字段
+            # 发言人字段处理：
+            # - 用户消息（sender.id 以 ou_ 开头）：写入人员字段，飞书自动显示姓名
+            # - 系统消息（msg_type=system）：发言人留空（消息内容本身已是描述）
+            # - 机器人消息（sender.id 以 cli_ 开头，非 system）：发言人留空，消息内容前加[机器人名]
             if sender_id and sender_id.startswith("ou_"):
                 speaker_field = [{"id": sender_id}]
+            elif msg_type == "system":
+                speaker_field = []
+                # 系统消息不加前缀，内容本身已是描述（如「张三邀请李四加入群组」）
+            elif sender_id and sender_id.startswith("cli_"):
+                # 机器人消息：加 [机器人名] 前缀
+                bot_name = m.get("sender", {}).get("name", "") or "机器人"
+                content = f"[{bot_name}] {content}" if content else f"[{bot_name}]"
+                speaker_field = []
             else:
-                # 机器人消息：发言人留空，把发送者身份写到消息内容前缀
-                if sender_id and sender_id.startswith("cli_"):
-                    # 获取应用名（如果 sender 里有 name 字段）
-                    bot_name = m.get("sender", {}).get("name", "") or "机器人"
-                    content = f"[{bot_name}] {content}" if content else f"[{bot_name}]"
                 speaker_field = []
 
             record = {
