@@ -10,7 +10,6 @@ from feishu import (
     FeishuClient,
     process_message_content,
     extract_resource_keys,
-    get_sender_name,
     SizeExceededError,
 )
 
@@ -328,19 +327,14 @@ def _run_sync(user_id, chat_id):
             )
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
 
-        # 4. 查询发送者姓名（仅用群成员接口，无需通讯录权限）
-        _set_progress(chat_id, stage="fetching_members", current=0, total=total,
-                      message="获取群成员姓名...")
-        sender_name_map = client.get_chat_members(chat_id)
-
-        # 5. 准备记录数据
+        # 4. 准备记录数据
+        # 发言人用人员字段：直接传 open_id，飞书自动解析为姓名+头像，无需我们调接口
         _set_progress(chat_id, stage="preparing_records", current=0, total=total,
                       message=f"准备记录数据 (0/{total})...")
         records = []
         msg_resources = {}
         for idx, m in enumerate(messages):
             sender_id = m.get("sender", {}).get("id", "")
-            sender = sender_name_map.get(sender_id) or get_sender_name(m)
             create_time = m.get("create_time")
             try:
                 date_value = int(create_time)
@@ -349,7 +343,7 @@ def _run_sync(user_id, chat_id):
             content = process_message_content(m)
 
             record = {
-                "发言人": sender,
+                "发言人": [{"id": sender_id}] if sender_id else [],
                 "时间": date_value,
                 "消息内容": content,
             }
