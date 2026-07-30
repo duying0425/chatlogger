@@ -333,6 +333,7 @@ def _run_sync(user_id, chat_id):
         try:
             client.ensure_fields(base_token, table_id, [
                 {"name": "发言人", "type": 11},
+                {"name": "发言人ID", "type": 1},
                 {"name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
                 {"name": "消息内容", "type": 1},
                 {"name": "附件", "type": 17},
@@ -354,6 +355,7 @@ def _run_sync(user_id, chat_id):
 
             record = {
                 "发言人": [{"id": sender_id}] if sender_id else [],
+                "发言人ID": sender_id or "",
                 "时间": date_value,
                 "消息内容": content,
             }

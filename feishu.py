@@ -238,11 +238,12 @@ class FeishuClient:
                     f"/bitable/v1/apps/{base_token}/tables/{default_table_id}/fields/{field['field_id']}"
                 )
 
-        # 创建字段：发言人（人员类型，飞书自动显示姓名+头像）、时间、附件
+        # 创建字段：发言人（人员，飞书自动显示姓名+头像）、发言人ID（文本，兜底）、时间、附件
         # 发言人用人员字段，写入 open_id 后飞书自动解析为姓名，无需通讯录权限
         # 注意：人员字段 type=11 不能传 property，否则报 UserFieldPropertiesError
         field_defs = [
             {"field_name": "发言人", "type": 11},
+            {"field_name": "发言人ID", "type": 1},
             {"field_name": "时间", "type": 5, "property": {"date_formatter": "yyyy-MM-dd HH:mm"}},
             {"field_name": "附件", "type": 17},
         ]
@@ -289,8 +290,7 @@ class FeishuClient:
         return True
 
     def batch_create_records(self, base_token, table_id, records):
-        """批量创建记录，每批最多 500 条。
-        如果因字段格式问题失败，自动降级重试（如人员字段值改为文本）。"""
+        """批量创建记录，每批最多 500 条。"""
         all_record_ids = []
         for i in range(0, len(records), 500):
             batch = records[i:i + 500]
@@ -299,23 +299,7 @@ class FeishuClient:
                 json={"records": [{"fields": r} for r in batch]},
             )
             if data.get("code") != 0:
-                # 降级重试：把人员字段的 [{id:...}] 格式改成字符串
-                # 适用于旧表里发言人字段是文本类型的情况
-                print(f"[batch_create_records] 首次失败: {data.get('msg', '')}, 尝试降级...")
-                degraded_batch = []
-                for r in batch:
-                    nr = dict(r)
-                    if isinstance(nr.get("发言人"), list):
-                        # 把 [{"id": "ou_xxx"}] 降级成 "ou_xxx"
-                        ids = [item.get("id", "") for item in nr["发言人"] if isinstance(item, dict)]
-                        nr["发言人"] = " ".join(i for i in ids if i)
-                    degraded_batch.append(nr)
-                data = self._api_post(
-                    f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_create",
-                    json={"records": [{"fields": r} for r in degraded_batch]},
-                )
-                if data.get("code") != 0:
-                    raise Exception(f"批量创建记录失败: {data}")
+                raise Exception(f"批量创建记录失败: {data}")
             for rec in data["data"]["records"]:
                 all_record_ids.append(rec["record_id"])
         return all_record_ids
