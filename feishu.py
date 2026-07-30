@@ -163,9 +163,10 @@ class FeishuClient:
 
     # ===== 资源下载 =====
 
-    def download_resource(self, message_id, file_key, resource_type="image", max_size_mb=20):
+    def download_resource(self, message_id, file_key, resource_type="image", max_size_mb=20, original_filename=""):
         """下载消息中的图片或文件，返回字节流。
-        超过 max_size_mb 则抛出 SizeExceededError（飞书 upload_all 限制 20MB）。"""
+        超过 max_size_mb 则抛出 SizeExceededError（飞书 upload_all 限制 20MB）。
+        文件名优先级：original_filename > Content-Disposition > file_key + 扩展名"""
         url = f"{Config.API_BASE}/im/v1/messages/{message_id}/resources/{file_key}"
         params = {"type": resource_type}
         # 先 HEAD 请求拿大小（飞书资源接口支持 Content-Length）
@@ -175,19 +176,22 @@ class FeishuClient:
         content_length = int(resp.headers.get("Content-Length", 0))
         if content_length > max_size_mb * 1024 * 1024:
             raise SizeExceededError(f"附件 {content_length // 1024 // 1024}MB 超过 {max_size_mb}MB 限制")
-        # 获取文件名
-        content_disp = resp.headers.get("Content-Disposition", "")
+        # 获取文件名：优先用原始文件名，其次从 Content-Disposition 解析
         filename = ""
-        if content_disp:
-            match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";\n]+)"?', content_disp)
-            if match:
-                filename = match.group(1)
-        # 飞书图片资源下载接口通常不返回文件名，根据类型补扩展名
-        # 否则多维表格无法识别图片格式进行预览
+        if original_filename:
+            filename = original_filename
+        else:
+            content_disp = resp.headers.get("Content-Disposition", "")
+            if content_disp:
+                match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";\n]+)"?', content_disp)
+                if match:
+                    filename = match.group(1)
+        # 兜底：用 file_key 作文件名
         if not filename:
             filename = file_key
+        # 图片类型必须补 .jpg 扩展名（飞书消息图片都是 jpeg）
+        # 否则多维表格无法识别图片格式进行预览
         if resource_type == "image" and "." not in filename.rsplit("/", 1)[-1]:
-            # 飞书消息里的图片资源都是 jpeg
             filename = filename + ".jpg"
         return resp.content, filename
 
@@ -425,7 +429,9 @@ def extract_resource_keys(msg):
             c = json.loads(content_str)
             key = c.get("image_key")
             if key:
-                resources.append({"message_id": message_id, "file_key": key, "type": "image"})
+                # 飞书图片下载接口不返回文件名，用 image_key + .jpg
+                resources.append({"message_id": message_id, "file_key": key, "type": "image",
+                                  "file_name": f"{key}.jpg"})
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -433,9 +439,10 @@ def extract_resource_keys(msg):
         try:
             c = json.loads(content_str)
             key = c.get("file_key")
-            name = c.get("file_name", "file")
+            name = c.get("file_name") or key or "file"
             if key:
-                resources.append({"message_id": message_id, "file_key": key, "type": "file", "file_name": name})
+                resources.append({"message_id": message_id, "file_key": key, "type": "file",
+                                  "file_name": name})
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -448,11 +455,14 @@ def extract_resource_keys(msg):
                     if elem.get("tag") == "img":
                         key = elem.get("image_key")
                         if key:
-                            resources.append({"message_id": message_id, "file_key": key, "type": "image"})
+                            resources.append({"message_id": message_id, "file_key": key, "type": "image",
+                                              "file_name": f"{key}.jpg"})
                     elif elem.get("tag") == "media":
                         key = elem.get("file_key")
+                        name = elem.get("file_name") or "media"
                         if key:
-                            resources.append({"message_id": message_id, "file_key": key, "type": "file", "file_name": "media"})
+                            resources.append({"message_id": message_id, "file_key": key, "type": "file",
+                                              "file_name": name})
         except (json.JSONDecodeError, TypeError):
             pass
 

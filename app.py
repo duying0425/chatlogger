@@ -392,7 +392,8 @@ def _run_sync(user_id, chat_id):
             for r in resources:
                 try:
                     file_content, filename = client.download_resource(
-                        r["message_id"], r["file_key"], r["type"]
+                        r["message_id"], r["file_key"], r["type"],
+                        original_filename=r.get("file_name", "")
                     )
                     file_token = client.upload_file(base_token, file_content, filename)
                     client.upload_attachment_to_record(
