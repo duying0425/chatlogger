@@ -19,9 +19,9 @@ class Config:
     API_BASE = "https://open.feishu.cn/open-apis"
 
     # 需要申请的 OAuth scope（空格分隔）
-    # im:chat.members:read - 读取群成员（直接返回 name，无需通讯录权限）
-    # im:chat:readonly - 读取群信息（群名称等）
-    OAUTH_SCOPES = "im:message:readonly im:message.group_msg:get_as_user im:chat.members:read im:chat:readonly bitable:app offline_access"
+    # 注：im:chat.members:read 已不需要（改用人员字段，飞书自动解析 open_id）
+    # 注：im:chat:readonly 用于获取群名，未开通时用 chat_id 兜底
+    OAUTH_SCOPES = "im:message:readonly im:message.group_msg:get_as_user bitable:app offline_access"
 
     # ===== 应用配置 =====
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-this-to-a-random-secret-key")
