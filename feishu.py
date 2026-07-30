@@ -288,7 +288,8 @@ class FeishuClient:
         return True
 
     def batch_create_records(self, base_token, table_id, records):
-        """批量创建记录，每批最多 500 条"""
+        """批量创建记录，每批最多 500 条。
+        如果因字段格式问题失败，自动降级重试（如人员字段值改为文本）。"""
         all_record_ids = []
         for i in range(0, len(records), 500):
             batch = records[i:i + 500]
@@ -297,7 +298,23 @@ class FeishuClient:
                 json={"records": [{"fields": r} for r in batch]},
             )
             if data.get("code") != 0:
-                raise Exception(f"批量创建记录失败: {data}")
+                # 降级重试：把人员字段的 [{id:...}] 格式改成字符串
+                # 适用于旧表里发言人字段是文本类型的情况
+                print(f"[batch_create_records] 首次失败: {data.get('msg', '')}, 尝试降级...")
+                degraded_batch = []
+                for r in batch:
+                    nr = dict(r)
+                    if isinstance(nr.get("发言人"), list):
+                        # 把 [{"id": "ou_xxx"}] 降级成 "ou_xxx"
+                        ids = [item.get("id", "") for item in nr["发言人"] if isinstance(item, dict)]
+                        nr["发言人"] = " ".join(i for i in ids if i)
+                    degraded_batch.append(nr)
+                data = self._api_post(
+                    f"/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_create",
+                    json={"records": [{"fields": r} for r in degraded_batch]},
+                )
+                if data.get("code") != 0:
+                    raise Exception(f"批量创建记录失败: {data}")
             for rec in data["data"]["records"]:
                 all_record_ids.append(rec["record_id"])
         return all_record_ids
@@ -352,6 +369,51 @@ class FeishuClient:
             if field["field_name"] == field_name:
                 return field["field_id"]
         return None
+
+    def ensure_fields(self, base_token, table_id, field_specs):
+        """检查并补建缺失的字段。
+        field_specs: [{"name": "发言人", "type": 11, "property": {...}}, ...]
+        返回新增的字段数。"""
+        data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{table_id}/fields")
+        if data.get("code") != 0:
+            raise Exception(f"获取字段列表失败: {data}")
+        existing = {f["field_name"] for f in data["data"]["items"]}
+        created = 0
+        for spec in field_specs:
+            name = spec["name"]
+            if name in existing:
+                continue
+            payload = {"field_name": name, "type": spec["type"]}
+            if "property" in spec:
+                payload["property"] = spec["property"]
+            r = self._api_post(
+                f"/bitable/v1/apps/{base_token}/tables/{table_id}/fields",
+                json=payload,
+            )
+            if r.get("code") == 0:
+                created += 1
+                existing.add(name)
+            else:
+                print(f"[ensure_fields] 创建字段 {name} 失败: {r}")
+        return created
+
+    def record_fields_to_ids(self, base_token, table_id, record):
+        """把 record.fields 的 key 从 field_name 转成 field_id（飞书 API 要求 field_id）。
+        返回转换后的 fields dict，找不到的 field_name 会被跳过。"""
+        field_map = {}  # field_name -> field_id
+        data = self._api_get(f"/bitable/v1/apps/{base_token}/tables/{table_id}/fields")
+        if data.get("code") != 0:
+            return record
+        for f in data["data"]["items"]:
+            field_map[f["field_name"]] = f["field_id"]
+        result = {}
+        for name, val in record.items():
+            fid = field_map.get(name)
+            if fid:
+                result[fid] = val
+            else:
+                print(f"[record_fields_to_ids] 字段 {name} 不存在，跳过")
+        return result
 
 
 def process_message_content(msg):
