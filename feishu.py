@@ -503,11 +503,53 @@ class FeishuClient:
         return result
 
 
+def _parse_content(content_str):
+    """解析消息 content 字段。
+    飞书 API 返回的 body.content 通常是 JSON 字符串，
+    但部分场景下可能是 dict / None / 空。统一返回 dict 或 None。
+    """
+    import json
+    if not content_str:
+        return None
+    if isinstance(content_str, dict):
+        return content_str
+    if isinstance(content_str, str):
+        try:
+            return json.loads(content_str)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def _resolve_mentions(content_str, msg):
+    """把飞书消息 content 中的 @_user_N 占位符替换为真实用户名。
+    飞书 @人信息保存在消息顶层的 mentions 数组中，结构：
+      [{"key":"@_user_1","id":{"open_id":"ou_xxx","user_id":"u_xxx"},"name":"张三"}, ...]
+    content 中以 @_user_N 占位符形式出现（text / post 均可能出现）。
+    """
+    mentions = msg.get("mentions") or []
+    if not mentions:
+        return content_str
+    for m in mentions:
+        key = m.get("key") if isinstance(m, dict) else None
+        if not key:
+            continue
+        # 名称优先级：name > id.user_id > id.open_id
+        name = m.get("name") or ""
+        if not name and isinstance(m.get("id"), dict):
+            name = m["id"].get("user_id") or m["id"].get("open_id") or ""
+        if name:
+            content_str = content_str.replace(key, f"@{name}")
+    return content_str
+
+
 def process_message_content(msg):
     """处理消息内容，返回适合写入多维表格的文本"""
     msg_type = msg.get("msg_type", "")
     body = msg.get("body", {})
     content_str = body.get("content", "")
+    # 统一替换 @人 占位符（text / post 都可能出现 @_user_N）
+    content_str = _resolve_mentions(content_str, msg)
 
     if msg_type == "text":
         try:
@@ -519,23 +561,63 @@ def process_message_content(msg):
     elif msg_type == "image":
         return "[图片]"
     elif msg_type == "post":
-        try:
-            import json
-            c = json.loads(content_str)
-            # 提取富文本中的文字
-            text_parts = []
-            locale = c.get("zh_cn") or c.get("en_us") or {}
-            for block in locale.get("content", []):
-                for elem in block:
-                    if elem.get("tag") == "text":
-                        text_parts.append(elem.get("text", ""))
-                    elif elem.get("tag") == "img":
-                        text_parts.append("[图片]")
-                    elif elem.get("tag") == "a":
-                        text_parts.append(elem.get("text", elem.get("href", "")))
-            return "\n".join(text_parts) if text_parts else "[富文本消息]"
-        except (json.JSONDecodeError, TypeError):
-            return "[富文本消息]"
+        # 飞书富文本（post）消息：body.content 是 JSON 字符串
+        # 结构: {"zh_cn":{"title":"...","content":[[{"tag":"text","text":"..."},{"tag":"img","image_key":"..."}]]}}
+        c = _parse_content(content_str)
+        if c is None:
+            return content_str or "[富文本消息]"
+        # 兼容 locale 在不同层级的情况
+        locale = c.get("zh_cn") or c.get("en_us") or c
+        # title 是富文本标题（可选）
+        title = locale.get("title") if isinstance(locale, dict) else None
+        text_parts = []
+        blocks = locale.get("content", []) if isinstance(locale, dict) else []
+        for block in blocks:
+            if not isinstance(block, list):
+                continue
+            line_parts = []
+            for elem in block:
+                if not isinstance(elem, dict):
+                    continue
+                tag = elem.get("tag")
+                if tag == "text":
+                    t = elem.get("text", "")
+                    if t:
+                        line_parts.append(t)
+                elif tag == "a":
+                    t = elem.get("text") or elem.get("href") or ""
+                    if t:
+                        line_parts.append(t)
+                elif tag == "at":
+                    # @人：显示用户名，没有则显示 user_id
+                    t = elem.get("user_name") or elem.get("user_id") or ""
+                    if t:
+                        line_parts.append(f"@{t}")
+                elif tag == "img":
+                    line_parts.append("[图片]")
+                elif tag == "media":
+                    line_parts.append("[视频]" if elem.get("file_key", "").endswith("mp4")
+                                     else "[文件]")
+                elif tag == "emoji":
+                    # 表情：飞书用 :text: 表示
+                    t = elem.get("text") or elem.get("name") or ""
+                    if t:
+                        line_parts.append(f":{t}:" if not t.startswith(":") else t)
+                elif tag == "code_block":
+                    t = elem.get("text", "")
+                    if t:
+                        line_parts.append(t)
+                else:
+                    # 兜底：尝试取 text 字段，没有就跳过
+                    t = elem.get("text", "")
+                    if t:
+                        line_parts.append(t)
+            if line_parts:
+                text_parts.append("".join(line_parts))
+        # 标题作为第一行
+        if title and title not in text_parts:
+            text_parts.insert(0, title)
+        return "\n".join(text_parts) if text_parts else "[富文本消息]"
     elif msg_type == "file":
         try:
             import json
@@ -596,23 +678,27 @@ def extract_resource_keys(msg):
             pass
 
     elif msg_type == "post":
-        try:
-            c = json.loads(content_str)
-            locale = c.get("zh_cn") or c.get("en_us") or {}
-            for block in locale.get("content", []):
-                for elem in block:
-                    if elem.get("tag") == "img":
-                        key = elem.get("image_key")
-                        if key:
-                            resources.append({"message_id": message_id, "file_key": key, "type": "image",
-                                              "file_name": f"{key}.jpg"})
-                    elif elem.get("tag") == "media":
-                        key = elem.get("file_key")
-                        name = elem.get("file_name") or "media"
-                        if key:
-                            resources.append({"message_id": message_id, "file_key": key, "type": "file",
-                                              "file_name": name})
-        except (json.JSONDecodeError, TypeError):
-            pass
+        c = _parse_content(content_str)
+        if isinstance(c, dict):
+            locale = c.get("zh_cn") or c.get("en_us") or c
+            if isinstance(locale, dict):
+                for block in locale.get("content", []):
+                    if not isinstance(block, list):
+                        continue
+                    for elem in block:
+                        if not isinstance(elem, dict):
+                            continue
+                        tag = elem.get("tag")
+                        if tag == "img":
+                            key = elem.get("image_key")
+                            if key:
+                                resources.append({"message_id": message_id, "file_key": key, "type": "image",
+                                                  "file_name": f"{key}.jpg"})
+                        elif tag == "media":
+                            key = elem.get("file_key")
+                            name = elem.get("file_name") or "media"
+                            if key:
+                                resources.append({"message_id": message_id, "file_key": key, "type": "file",
+                                                  "file_name": name})
 
     return resources
