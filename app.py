@@ -189,20 +189,26 @@ def api_add_chat():
     if not chat_id:
         return jsonify({"error": "请输入群聊 ID"}), 400
 
+    # 用户可手动指定群名称（可选）。留空则尝试拉取，再不行退化为 chat_id
+    custom_name = (request.json.get("chat_name") or "").strip()
+
     # 检查是否已存在
     existing = models.get_chat(user["id"], chat_id)
     if existing:
         return jsonify({"error": "该群聊已存在"}), 409
 
-    # 尝试获取群名称
-    client = get_feishu_client()
-    chat_name = chat_id
-    if client:
-        try:
-            chat_info = client.get_chat_info(chat_id)
-            chat_name = chat_info.get("name", chat_id)
-        except Exception:
-            pass
+    # 名称优先级：用户填写 > API 拉取 > chat_id
+    chat_name = custom_name
+    if not chat_name:
+        client = get_feishu_client()
+        if client:
+            try:
+                chat_info = client.get_chat_info(chat_id)
+                chat_name = chat_info.get("name", "") or ""
+            except Exception:
+                chat_name = ""
+    if not chat_name:
+        chat_name = chat_id
 
     models.add_chat(user["id"], chat_id, chat_name)
     return jsonify({"ok": True, "chat_name": chat_name})
@@ -294,14 +300,19 @@ def _run_sync(user_id, chat_id):
             _set_progress(chat_id, stage="error", running=False, error="群聊未配置")
             return
 
-        # 1. 获取群名称（如果还没有）
+        # 1. 获取群名称：仅在尚未设置（或退化为 chat_id）时尝试拉取，避免覆盖用户自定义名称
         _set_progress(chat_id, stage="fetching_chat_info", message="获取群信息...")
-        chat_name = chat_config.get("chat_name") or chat_id
-        try:
-            chat_info = client.get_chat_info(chat_id)
-            chat_name = chat_info.get("name", chat_name)
-        except Exception:
-            pass
+        chat_name = chat_config.get("chat_name") or ""
+        if not chat_name or chat_name == chat_id:
+            try:
+                chat_info = client.get_chat_info(chat_id)
+                fetched = chat_info.get("name", "") or ""
+                if fetched:
+                    chat_name = fetched
+            except Exception:
+                pass
+        if not chat_name:
+            chat_name = chat_id
 
         # 2. 获取新消息
         _set_progress(chat_id, stage="fetching_messages", message="拉取群消息...")
@@ -673,6 +684,7 @@ INDEX_PAGE = """
             <h2>添加群聊</h2>
             <div class="input-row">
                 <input type="text" id="chatIdInput" placeholder="输入群聊 ID (oc_xxx)" />
+                <input type="text" id="chatNameInput" placeholder="群聊名称（可选，留空自动获取）" style="flex:1; min-width:160px;" />
                 <button onclick="addChat()">添加</button>
             </div>
         </div>
@@ -730,12 +742,14 @@ INDEX_PAGE = """
 
         async function addChat() {
             const input = document.getElementById('chatIdInput');
+            const nameInput = document.getElementById('chatNameInput');
             const chatId = input.value.trim();
             if (!chatId) return;
+            const chatName = nameInput.value.trim();
             const resp = await fetch('/api/chats', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId }),
+                body: JSON.stringify({ chat_id: chatId, chat_name: chatName || undefined }),
             });
             const data = await resp.json();
             if (data.ok) { location.reload(); }
