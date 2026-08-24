@@ -199,19 +199,29 @@ def api_add_chat():
 
     # 名称优先级：用户填写 > API 拉取 > chat_id
     chat_name = custom_name
+    name_fetch_error = ""
     if not chat_name:
         client = get_feishu_client()
         if client:
             try:
                 chat_info = client.get_chat_info(chat_id)
                 chat_name = chat_info.get("name", "") or ""
-            except Exception:
+            except Exception as e:
                 chat_name = ""
+                name_fetch_error = str(e)
+                print(f"[add_chat] 自动获取群名失败 chat_id={chat_id}: {e}")
     if not chat_name:
         chat_name = chat_id
 
     models.add_chat(user["id"], chat_id, chat_name)
-    return jsonify({"ok": True, "chat_name": chat_name})
+    result = {"ok": True, "chat_name": chat_name}
+    if name_fetch_error:
+        # 获取失败原因可见，不再静默退化为 chat_id
+        warning = "已添加，但自动获取群名失败，暂用群聊 ID 代替"
+        if "232025" in name_fetch_error:
+            warning += "：应用未开通机器人能力，请在飞书开发者后台「添加应用能力」中开通机器人"
+        result["warning"] = warning
+    return jsonify(result)
 
 @app.route("/api/chats/<chat_id>", methods=["DELETE"])
 def api_delete_chat(chat_id):
@@ -309,8 +319,8 @@ def _run_sync(user_id, chat_id):
                 fetched = chat_info.get("name", "") or ""
                 if fetched:
                     chat_name = fetched
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[sync] 自动获取群名失败 chat_id={chat_id}: {e}")
         if not chat_name:
             chat_name = chat_id
 
@@ -647,6 +657,7 @@ INDEX_PAGE = """
         .toast { position: fixed; top: 20px; right: 20px; padding: 12px 22px; border-radius: 8px; color: white; font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 400px; }
         .toast.success { background: #00b42a; }
         .toast.error { background: #f53f3f; }
+        .toast.warn { background: #ff7d00; }
         .toast.show { opacity: 1; pointer-events: auto; }
         .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; justify-content: center; align-items: center; z-index: 1000; pointer-events: none; }
         .modal-mask.show { display: flex; pointer-events: auto; }
@@ -733,6 +744,15 @@ INDEX_PAGE = """
         </div>
     </div>
     <script>
+        // 显示上次添加群聊返回的警告（如自动获取群名失败）
+        window.addEventListener('load', function() {
+            const w = sessionStorage.getItem('addChatWarning');
+            if (w) {
+                sessionStorage.removeItem('addChatWarning');
+                showToast(w, 'warn');
+            }
+        });
+
         function showToast(msg, type) {
             const toast = document.getElementById('toast');
             toast.textContent = msg;
@@ -752,7 +772,10 @@ INDEX_PAGE = """
                 body: JSON.stringify({ chat_id: chatId, chat_name: chatName || undefined }),
             });
             const data = await resp.json();
-            if (data.ok) { location.reload(); }
+            if (data.ok) {
+                if (data.warning) { sessionStorage.setItem('addChatWarning', data.warning); }
+                location.reload();
+            }
             else { showToast(data.error || '添加失败', 'error'); }
         }
 
