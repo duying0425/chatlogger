@@ -21,5 +21,11 @@ venv.bak/
 # Logs
 *.log
 
-# Local Cache
+# Local Cache & Data
 cache/
+data/
+
+# Docker overrides
+docker-compose.override.yml
+docker-compose.*.yml
+!docker-compose.yml
