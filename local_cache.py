@@ -1,0 +1,383 @@
+import os
+import re
+import io
+import time
+import json
+import shutil
+import zipfile
+from datetime import datetime, timezone, timedelta
+from config import Config
+
+
+def sanitize_filename(name, fallback="file"):
+    """移除非法字符，生成安全的文件名/目录名（兼容 Windows/Linux）"""
+    if not name:
+        return fallback
+    # 替换 Windows/Linux 文件系统非法字符: \ / : * ? " < > | \r \n \t
+    cleaned = re.sub(r'[\\/*?:"<>|\r\n\t]+', "_", str(name)).strip(" ._")
+    return cleaned if cleaned else fallback
+
+
+def get_chat_cache_dir(chat_id, chat_name=None):
+    """获取或创建指定群聊的本地缓存根目录及 assets 目录。
+    目录命名规则：cache/{safe_chat_name}_{chat_id}
+    如果已存在匹配 *_{chat_id} 的目录，则复用该目录（避免改名后创建新目录）。
+    """
+    base_dir = Config.LOCAL_CACHE_DIR
+    os.makedirs(base_dir, exist_ok=True)
+
+    # 优先查找是否已有历史目录匹配当前 chat_id
+    if os.path.exists(base_dir):
+        for entry in os.listdir(base_dir):
+            full_entry = os.path.join(base_dir, entry)
+            if os.path.isdir(full_entry) and entry.endswith(f"_{chat_id}"):
+                assets_dir = os.path.join(full_entry, "assets")
+                os.makedirs(assets_dir, exist_ok=True)
+                return full_entry
+
+    safe_name = sanitize_filename(chat_name or chat_id, fallback="chat")
+    dir_name = f"{safe_name}_{chat_id}"
+    chat_dir = os.path.join(base_dir, dir_name)
+    assets_dir = os.path.join(chat_dir, "assets")
+
+    os.makedirs(chat_dir, exist_ok=True)
+    os.makedirs(assets_dir, exist_ok=True)
+    return chat_dir
+
+
+def get_chat_md_path(chat_id, chat_name=None):
+    """获取群聊对应的 Markdown 文件绝对路径。"""
+    chat_dir = get_chat_cache_dir(chat_id, chat_name)
+    # 若目录下已有 .md 文件，优先复用已有的
+    for f in os.listdir(chat_dir):
+        if f.endswith(".md"):
+            return os.path.join(chat_dir, f)
+    # 否则根据群名创建
+    safe_name = sanitize_filename(chat_name or chat_id, fallback="chat")
+    return os.path.join(chat_dir, f"{safe_name}.md")
+
+
+def init_chat_cache(chat_id, chat_name=None):
+    """如果 Markdown 文件尚不存在，初始化并写入头部元信息。"""
+    md_path = get_chat_md_path(chat_id, chat_name)
+    if os.path.exists(md_path) and os.path.getsize(md_path) > 0:
+        return md_path
+
+    display_name = chat_name or chat_id
+    now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    header = (
+        f"# {display_name} - 聊天记录归档\n\n"
+        f"> - **群聊名称**: {display_name}\n"
+        f"> - **群聊 ID**: `{chat_id}`\n"
+        f"> - **初次归档时间**: {now_str}\n\n"
+        f"---\n\n"
+    )
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(header)
+    return md_path
+
+
+def save_asset(chat_id, chat_name, file_content, filename, file_key=""):
+    """保存图片或附件到 cache/{chat}/assets/ 目录。
+    返回在 Markdown 中使用的相对路径，如: assets/unique_file.jpg
+    """
+    chat_dir = get_chat_cache_dir(chat_id, chat_name)
+    assets_dir = os.path.join(chat_dir, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+
+    safe_name = sanitize_filename(filename, fallback=file_key or "attachment")
+    # 避免重名覆盖：如果文件已存在但内容不同，加上 file_key 前缀
+    target_path = os.path.join(assets_dir, safe_name)
+    if os.path.exists(target_path):
+        # 检查大小，如果大小相同则视为同一文件直接复用
+        if os.path.getsize(target_path) == len(file_content):
+            return f"assets/{safe_name}"
+        # 否则加唯一标识
+        prefix = sanitize_filename(file_key[:8]) if file_key else str(int(time.time()))
+        safe_name = f"{prefix}_{safe_name}"
+        target_path = os.path.join(assets_dir, safe_name)
+
+    with open(target_path, "wb") as f:
+        f.write(file_content)
+
+    return f"assets/{safe_name}"
+
+
+def _format_post_content(locale_dict, asset_map=None):
+    """格式化飞书富文本（post）为标准 Markdown 文本，并内嵌替换图片与多媒体相对路径。"""
+    if not isinstance(locale_dict, dict):
+        return ""
+
+    title = locale_dict.get("title", "")
+    lines = []
+    if title:
+        lines.append(f"### {title}\n")
+
+    blocks = locale_dict.get("content", [])
+    if not isinstance(blocks, list):
+        return "\n".join(lines)
+
+    for block in blocks:
+        if not isinstance(block, list):
+            continue
+        line_parts = []
+        for elem in block:
+            if not isinstance(elem, dict):
+                continue
+            tag = elem.get("tag")
+            if tag == "text":
+                t = elem.get("text", "")
+                styles = elem.get("style", []) or []
+                if "bold" in styles:
+                    t = f"**{t}**"
+                if "italic" in styles:
+                    t = f"*{t}*"
+                if "lineThrough" in styles:
+                    t = f"~~{t}~~"
+                if "underline" in styles:
+                    t = f"<u>{t}</u>"
+                line_parts.append(t)
+            elif tag == "a":
+                text = elem.get("text") or elem.get("href") or "链接"
+                href = elem.get("href") or ""
+                line_parts.append(f"[{text}]({href})" if href else text)
+            elif tag == "at":
+                name = elem.get("user_name") or elem.get("user_id") or "成员"
+                line_parts.append(f"@{name}")
+            elif tag == "img":
+                key = elem.get("image_key", "")
+                rel_path = asset_map.get(key) if asset_map else None
+                if rel_path:
+                    line_parts.append(f"\n\n![图片]({rel_path})\n\n")
+                else:
+                    line_parts.append("[图片]")
+            elif tag == "media":
+                key = elem.get("file_key", "")
+                name = elem.get("file_name") or "视频"
+                rel_path = asset_map.get(key) if asset_map else None
+                if rel_path:
+                    line_parts.append(f"\n\n[🎬 {name}]({rel_path})\n\n")
+                else:
+                    line_parts.append(f"[视频: {name}]")
+            elif tag == "code_block":
+                code = elem.get("text", "")
+                lang = elem.get("language", "")
+                line_parts.append(f"\n\n```{lang}\n{code}\n```\n\n")
+            elif tag in ("emoji", "emotion"):
+                emoji_name = elem.get("name") or elem.get("text") or ""
+                line_parts.append(f":{emoji_name}:" if emoji_name else "")
+            else:
+                t = elem.get("text", "")
+                if t:
+                    line_parts.append(t)
+        if line_parts:
+            lines.append("".join(line_parts))
+
+    return "\n\n".join(lines).strip()
+
+
+def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skipped_notes=None):
+    """将一条飞书消息对象格式化为标准 Markdown 消息块。
+    msg: 飞书消息 dict
+    speaker_name: 解析后的发言人姓名（如 "张三"、"系统"、"机器人"）
+    date_str: 格式化时间字符串 "YYYY-MM-DD HH:mm:ss"
+    asset_map: {file_key: rel_path} 映射表
+    skipped_notes: 该条消息被跳过的附件提示（如超大文件）
+    """
+    if asset_map is None:
+        asset_map = {}
+
+    msg_id = msg.get("message_id", "")
+    msg_type = msg.get("msg_type", "")
+    body = msg.get("body", {})
+    content_raw = body.get("content", "")
+
+    # 解析 content
+    content_dict = None
+    if isinstance(content_raw, dict):
+        content_dict = content_raw
+    elif isinstance(content_raw, str):
+        try:
+            content_dict = json.loads(content_raw)
+        except Exception:
+            content_dict = None
+
+    content_md = ""
+    used_asset_keys = set()
+
+    if msg_type == "text":
+        text = content_dict.get("text", content_raw) if content_dict else str(content_raw)
+        # 兼容 @_user_N 替换
+        from feishu import _resolve_mentions
+        text = _resolve_mentions(text, msg)
+        content_md = text
+
+    elif msg_type == "post":
+        if content_dict:
+            locale = content_dict.get("zh_cn") or content_dict.get("en_us") or content_dict
+            content_md = _format_post_content(locale, asset_map)
+            # 记录已在 post 中内嵌渲染的 asset
+            for k in asset_map:
+                if k in str(content_dict):
+                    used_asset_keys.add(k)
+        else:
+            content_md = "[富文本消息]"
+
+    elif msg_type == "image":
+        key = content_dict.get("image_key", "") if content_dict else ""
+        rel_path = asset_map.get(key)
+        if rel_path:
+            content_md = f"![图片]({rel_path})"
+            used_asset_keys.add(key)
+        else:
+            content_md = "![图片]([图片下载失败或已跳过])"
+
+    elif msg_type == "file":
+        key = content_dict.get("file_key", "") if content_dict else ""
+        fname = content_dict.get("file_name", "文件") if content_dict else "文件"
+        rel_path = asset_map.get(key)
+        if rel_path:
+            content_md = f"[📎 {fname}]({rel_path})"
+            used_asset_keys.add(key)
+        else:
+            content_md = f"[📎 {fname} (未下载或超出限制)]"
+
+    elif msg_type == "system":
+        from feishu import process_message_content
+        content_md = f"*{process_message_content(msg)}*"
+
+    elif msg_type == "audio":
+        content_md = "[🎵 语音消息]"
+
+    elif msg_type == "media":
+        content_md = "[🎬 视频消息]"
+
+    else:
+        from feishu import process_message_content
+        content_md = process_message_content(msg)
+
+    # 检查是否有未在正文中渲染的关联资源（如普通消息的附件），追加到消息底部
+    extra_assets = []
+    for k, rel_path in asset_map.items():
+        if k not in used_asset_keys:
+            if rel_path.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                extra_assets.append(f"![图片]({rel_path})")
+            else:
+                base_fname = os.path.basename(rel_path)
+                extra_assets.append(f"[📎 {base_fname}]({rel_path})")
+
+    if extra_assets:
+        content_md = content_md + "\n\n" + "\n\n".join(extra_assets)
+
+    # 追加跳过说明（若有）
+    if skipped_notes:
+        notes_str = " ".join(skipped_notes)
+        content_md += f"\n\n> ⚠️ *{notes_str}*"
+
+    # 规范组合单条消息块
+    header_speaker = f"**{speaker_name}**" if speaker_name else "**未知发言人**"
+    if msg_type == "system":
+        block = f"*系统消息 · {date_str}*\n\n{content_md}\n\n---\n"
+    else:
+        block = f"{header_speaker} &nbsp; `{date_str}`\n\n{content_md}\n\n---\n"
+
+    return block
+
+
+def append_messages_to_cache(chat_id, chat_name, formatted_blocks):
+    """将一组格式化好的 Markdown 消息块批量追加到本地缓存文件中。"""
+    if not formatted_blocks:
+        return
+
+    md_path = init_chat_cache(chat_id, chat_name)
+    with open(md_path, "a", encoding="utf-8") as f:
+        for b in formatted_blocks:
+            f.write(b + "\n")
+
+
+def has_cache(chat_id, chat_name=None):
+    """检查群聊是否已有本地缓存（MD 文件存在且非空）。"""
+    chat_dir = get_chat_cache_dir(chat_id, chat_name)
+    if not os.path.exists(chat_dir):
+        return False
+    for f in os.listdir(chat_dir):
+        if f.endswith(".md"):
+            p = os.path.join(chat_dir, f)
+            if os.path.getsize(p) > 0:
+                return True
+    return False
+
+
+def get_cache_info(chat_id, chat_name=None):
+    """获取群聊本地缓存统计信息。"""
+    chat_dir = get_chat_cache_dir(chat_id, chat_name)
+    if not os.path.exists(chat_dir):
+        return {"exists": False}
+
+    md_path = None
+    md_size = 0
+    md_name = ""
+    updated_at = ""
+
+    for f in os.listdir(chat_dir):
+        if f.endswith(".md"):
+            md_path = os.path.join(chat_dir, f)
+            md_name = f
+            md_size = os.path.getsize(md_path)
+            mtime = os.path.getmtime(md_path)
+            updated_at = datetime.fromtimestamp(mtime, tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+            break
+
+    if not md_path:
+        return {"exists": False}
+
+    assets_dir = os.path.join(chat_dir, "assets")
+    asset_count = 0
+    assets_size = 0
+    if os.path.exists(assets_dir):
+        for root, _, files in os.walk(assets_dir):
+            for file in files:
+                asset_count += 1
+                assets_size += os.path.getsize(os.path.join(root, file))
+
+    total_size = md_size + assets_size
+    return {
+        "exists": True,
+        "chat_dir": chat_dir,
+        "md_path": md_path,
+        "md_name": md_name,
+        "md_size": md_size,
+        "asset_count": asset_count,
+        "total_size": total_size,
+        "updated_at": updated_at,
+    }
+
+
+def get_raw_markdown(chat_id, chat_name=None):
+    """读取并返回群聊的原始 Markdown 内容。"""
+    md_path = get_chat_md_path(chat_id, chat_name)
+    if not os.path.exists(md_path):
+        return None
+    with open(md_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def build_cache_zip(chat_id, chat_name=None):
+    """将群聊的本地缓存目录（包括 .md 和 assets 目录）打包为 ZIP 文件流。
+    返回 (zip_bytes_io, zip_filename)
+    """
+    chat_dir = get_chat_cache_dir(chat_id, chat_name)
+    safe_name = sanitize_filename(chat_name or chat_id, fallback="chat")
+    zip_filename = f"{safe_name}_archive.zip"
+
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(chat_dir):
+            for file in files:
+                abs_path = os.path.join(root, file)
+                rel_path = os.path.relpath(abs_path, chat_dir)
+                zf.write(abs_path, arcname=rel_path)
+
+    memory_file.seek(0)
+    return memory_file, zip_filename
+

@@ -183,6 +183,24 @@ class FeishuClient:
             raise Exception(f"获取群信息失败: {data}")
         return data["data"]
 
+    def get_chat_members_safe(self, chat_id):
+        """尝试获取群成员姓名映射表 {open_id: name}。
+        如果应用未申请或未通过相关权限，安全静默降级并返回空字典，绝不阻断主流程。
+        """
+        result = {}
+        try:
+            params = {"member_id_type": "open_id", "page_size": 100}
+            data = self._api_get(f"/im/v1/chats/{chat_id}/members", params=params)
+            if data.get("code") == 0:
+                for m in data.get("data", {}).get("items", []):
+                    oid = m.get("member_id", "")
+                    name = m.get("name", "")
+                    if oid and name:
+                        result[oid] = name
+        except Exception:
+            pass
+        return result
+
     # ===== 消息读取 =====
 
     def list_messages(self, chat_id, page_size=50, page_token=None, sort_type="ByCreateTimeAsc"):

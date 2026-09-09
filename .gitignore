@@ -20,3 +20,6 @@ venv.bak/
 
 # Logs
 *.log
+
+# Local Cache
+cache/

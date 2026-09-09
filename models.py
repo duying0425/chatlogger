@@ -38,12 +38,19 @@ def init_db():
             base_url TEXT,
             last_synced_position INTEGER DEFAULT 0,
             record_count INTEGER DEFAULT 0,
+            local_cache INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
             UNIQUE(user_id, chat_id)
         )
     """)
+
+    # 迁移：检查 chats 表是否已有 local_cache 字段
+    try:
+        c.execute("ALTER TABLE chats ADD COLUMN local_cache INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -114,16 +121,25 @@ def get_chat(user_id, chat_id):
     conn.close()
     return dict(row) if row else None
 
-def add_chat(user_id, chat_id, chat_name=None):
+def add_chat(user_id, chat_id, chat_name=None, local_cache=0):
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO chats (user_id, chat_id, chat_name) VALUES (?, ?, ?)",
-            (user_id, chat_id, chat_name)
+            "INSERT INTO chats (user_id, chat_id, chat_name, local_cache) VALUES (?, ?, ?, ?)",
+            (user_id, chat_id, chat_name, 1 if local_cache else 0)
         )
         conn.commit()
     except sqlite3.IntegrityError:
         pass  # 已存在则忽略
+    conn.close()
+
+def update_chat_local_cache(user_id, chat_id, local_cache):
+    conn = get_db()
+    conn.execute(
+        "UPDATE chats SET local_cache = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND chat_id = ?",
+        (1 if local_cache else 0, user_id, chat_id)
+    )
+    conn.commit()
     conn.close()
 
 def delete_chat(user_id, chat_id):

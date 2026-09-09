@@ -3,9 +3,19 @@ import time
 import json
 import threading
 import traceback
-from flask import Flask, request, redirect, session, jsonify, render_template_string, make_response
+import sys
+from flask import Flask, request, redirect, session, jsonify, render_template_string, make_response, send_file, abort
+
+# 确保在 Windows 控制台下输出 UTF-8，防止 GBK 终端乱码或 Emoji 导致 UnicodeEncodeError
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 from config import Config
 import models
+import local_cache
 from feishu import (
     FeishuClient,
     process_message_content,
@@ -62,7 +72,7 @@ def get_feishu_client():
         user_id=user["id"],
     )
 
-def timestamp_to_datetime(ts):
+def timestamp_to_datetime(ts, with_seconds=True):
     """飞书消息的 create_time 是毫秒时间戳，转为 datetime 字符串"""
     if not ts:
         return ""
@@ -73,7 +83,8 @@ def timestamp_to_datetime(ts):
             ts_int = ts_int // 1000
         from datetime import datetime, timezone, timedelta
         dt = datetime.fromtimestamp(ts_int, tz=timezone(timedelta(hours=8)))
-        return dt.strftime("%Y-%m-%d %H:%M")
+        fmt = "%Y-%m-%d %H:%M:%S" if with_seconds else "%Y-%m-%d %H:%M"
+        return dt.strftime(fmt)
     except (ValueError, TypeError):
         return str(ts)
 
@@ -88,6 +99,8 @@ def index():
         return resp
 
     chats = models.get_chats(user["id"])
+    for chat in chats:
+        chat["has_cache"] = local_cache.has_cache(chat["chat_id"], chat.get("chat_name"))
     resp = make_response(render_template_string(INDEX_PAGE, user=user, chats=chats))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
@@ -144,6 +157,8 @@ def api_get_chats():
     if not user:
         return jsonify({"error": "未登录"}), 401
     chats = models.get_chats(user["id"])
+    for chat in chats:
+        chat["has_cache"] = local_cache.has_cache(chat["chat_id"], chat.get("chat_name"))
     return jsonify({"chats": chats})
 
 @app.route("/api/chat_stats/<chat_id>", methods=["GET"])
@@ -192,6 +207,11 @@ def api_add_chat():
     # 用户可手动指定群名称（可选）。留空则尝试拉取，再不行退化为 chat_id
     custom_name = (request.json.get("chat_name") or "").strip()
 
+    # 是否开启本地缓存（默认跟随全局设置）
+    local_cache_opt = request.json.get("local_cache")
+    if local_cache_opt is None:
+        local_cache_opt = Config.DEFAULT_LOCAL_CACHE
+
     # 检查是否已存在
     existing = models.get_chat(user["id"], chat_id)
     if existing:
@@ -213,8 +233,8 @@ def api_add_chat():
     if not chat_name:
         chat_name = chat_id
 
-    models.add_chat(user["id"], chat_id, chat_name)
-    result = {"ok": True, "chat_name": chat_name}
+    models.add_chat(user["id"], chat_id, chat_name, local_cache=1 if local_cache_opt else 0)
+    result = {"ok": True, "chat_name": chat_name, "local_cache": bool(local_cache_opt)}
     if name_fetch_error:
         # 获取失败原因可见，不再静默退化为 chat_id
         warning = "已添加，但自动获取群名失败，暂用群聊 ID 代替"
@@ -222,6 +242,27 @@ def api_add_chat():
             warning += "：应用未开通机器人能力，请在飞书开发者后台「添加应用能力」中开通机器人"
         result["warning"] = warning
     return jsonify(result)
+
+@app.route("/api/chats/<chat_id>/toggle_cache", methods=["POST"])
+def api_toggle_cache(chat_id):
+    """切换或设置指定群聊的本地缓存开关"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return jsonify({"error": "群聊未配置"}), 404
+
+    req_data = request.get_json(silent=True) or {}
+    enabled = req_data.get("enabled")
+    if enabled is None:
+        enabled = not bool(chat_config.get("local_cache", 0))
+    else:
+        enabled = bool(enabled)
+
+    models.update_chat_local_cache(user["id"], chat_id, enabled)
+    return jsonify({"ok": True, "local_cache": enabled})
 
 @app.route("/api/chats/<chat_id>", methods=["DELETE"])
 def api_delete_chat(chat_id):
@@ -244,6 +285,123 @@ def api_delete_chat(chat_id):
 
     models.delete_chat(user["id"], chat_id)
     return jsonify({"ok": True})
+
+# ===== 本地缓存预览与资源路由 =====
+
+@app.route("/cache/<chat_id>/view")
+def cache_view(chat_id):
+    """在线预览 Markdown 归档页面，支持图片灯箱和附件一键下载"""
+    user = get_current_user()
+    if not user:
+        return redirect("/")
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return "群聊未配置", 404
+
+    chat_name = chat_config.get("chat_name") or chat_id
+    raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
+    info = local_cache.get_cache_info(chat_id, chat_name)
+
+    return render_template_string(
+        VIEW_PAGE,
+        chat=chat_config,
+        chat_id=chat_id,
+        chat_name=chat_name,
+        raw_markdown=raw_md or "",
+        has_cache=bool(raw_md),
+        info=info,
+        user=user,
+    )
+
+@app.route("/cache/<chat_id>/raw")
+def cache_raw(chat_id):
+    """获取/下载原始 .md 文件"""
+    user = get_current_user()
+    if not user:
+        return redirect("/")
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return "群聊未配置", 404
+
+    chat_name = chat_config.get("chat_name") or chat_id
+    raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
+    if raw_md is None:
+        return "尚未生成本地缓存", 404
+
+    safe_name = local_cache.sanitize_filename(chat_name, fallback="chat")
+    from urllib.parse import quote
+    encoded_name = quote(f"{safe_name}.md")
+    resp = make_response(raw_md)
+    resp.headers["Content-Type"] = "text/markdown; charset=utf-8"
+    resp.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+    return resp
+
+@app.route("/cache/<chat_id>/download")
+def cache_download(chat_id):
+    """打包下载本地缓存完整 ZIP 归档（含 Markdown 和 assets 目录）"""
+    user = get_current_user()
+    if not user:
+        return redirect("/")
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return "群聊未配置", 404
+
+    chat_name = chat_config.get("chat_name") or chat_id
+    if not local_cache.has_cache(chat_id, chat_name):
+        return "尚未生成本地缓存", 404
+
+    memory_file, zip_filename = local_cache.build_cache_zip(chat_id, chat_name)
+    from urllib.parse import quote
+    encoded_name = quote(zip_filename)
+    resp = send_file(
+        memory_file,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=zip_filename,
+    )
+    resp.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+    return resp
+
+@app.route("/cache/<chat_id>/assets/<path:filename>")
+def cache_asset(chat_id, filename):
+    """提供本地缓存附件访问服务：图片内嵌渲染预览，非图片/点击链接直接下载"""
+    user = get_current_user()
+    if not user:
+        return "未登录", 401
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return "群聊未配置", 404
+
+    chat_name = chat_config.get("chat_name") or chat_id
+    chat_dir = local_cache.get_chat_cache_dir(chat_id, chat_name)
+    assets_dir = os.path.join(chat_dir, "assets")
+    file_path = os.path.abspath(os.path.join(assets_dir, filename))
+
+    # 安全检查：防止目录遍历
+    if not file_path.startswith(os.path.abspath(assets_dir)):
+        return "非法请求路径", 403
+
+    if not os.path.exists(file_path):
+        return "附件不存在", 404
+
+    is_image = filename.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp"))
+    force_download = request.args.get("download") == "1" or not is_image
+
+    base_name = os.path.basename(filename)
+    from urllib.parse import quote
+    encoded_name = quote(base_name)
+    resp = send_file(
+        file_path,
+        as_attachment=force_download,
+        download_name=base_name,
+    )
+    if force_download:
+        resp.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{encoded_name}"
+    return resp
 
 @app.route("/api/sync/<chat_id>", methods=["POST"])
 def api_sync(chat_id):
@@ -310,6 +468,8 @@ def _run_sync(user_id, chat_id):
             _set_progress(chat_id, stage="error", running=False, error="群聊未配置")
             return
 
+        is_local_cache_enabled = bool(chat_config.get("local_cache", 0))
+
         # 1. 获取群名称：仅在尚未设置（或退化为 chat_id）时尝试拉取，避免覆盖用户自定义名称
         _set_progress(chat_id, stage="fetching_chat_info", message="获取群信息...")
         chat_name = chat_config.get("chat_name") or ""
@@ -337,6 +497,24 @@ def _run_sync(user_id, chat_id):
         total = len(messages)
         _set_progress(chat_id, stage="messages_fetched", current=0, total=total,
                       message=f"已拉取 {total} 条新消息")
+
+        # 解析发言人姓名（用于本地缓存 Markdown 归档）
+        speaker_names = {}
+        if user.get("open_id") and user.get("name"):
+            speaker_names[user["open_id"]] = user["name"]
+        try:
+            members_map = client.get_chat_members_safe(chat_id)
+            if members_map:
+                speaker_names.update(members_map)
+        except Exception:
+            pass
+        for m in messages:
+            for item in (m.get("mentions") or []):
+                if isinstance(item, dict):
+                    oid = item.get("id", {}).get("open_id") if isinstance(item.get("id"), dict) else None
+                    name = item.get("name")
+                    if oid and name:
+                        speaker_names[oid] = name
 
         # 3. 确保多维表格存在
         base_token = chat_config.get("base_token")
@@ -466,6 +644,8 @@ def _run_sync(user_id, chat_id):
                           message="无附件")
 
         attach_done = 0
+        downloaded_assets = {}  # file_key -> rel_path
+
         for i, m in enumerate(messages):
             msg_id = m["message_id"]
             resources = msg_resources.get(msg_id, [])
@@ -486,6 +666,16 @@ def _run_sync(user_id, chat_id):
                                 r["message_id"], r["file_key"], r["type"],
                                 original_filename=r.get("file_name", "")
                             )
+                            # 若开启本地缓存，保存文件至 cache/{chat}/assets/
+                            if is_local_cache_enabled:
+                                try:
+                                    rel_path = local_cache.save_asset(
+                                        chat_id, chat_name, file_content, filename, r["file_key"]
+                                    )
+                                    downloaded_assets[r["file_key"]] = rel_path
+                                except Exception as ce:
+                                    print(f"[local_cache] 保存附件失败: {ce}")
+
                             file_token = client.upload_file(base_token, file_content, filename)
                             client.upload_attachment_to_record(
                                 base_token, table_id, record_id, "附件", file_token
@@ -527,6 +717,45 @@ def _run_sync(user_id, chat_id):
                 except Exception as e:
                     print(f"[写入跳过说明失败] {e}")
 
+        # 7.6 若开启本地缓存，格式化所有消息并追加写入 Markdown 文件
+        if is_local_cache_enabled:
+            try:
+                _set_progress(chat_id, stage="saving_local_cache", current=0, total=total,
+                              message="正在写入本地缓存 Markdown...")
+                md_blocks = []
+                for i, m in enumerate(messages):
+                    sid = m.get("sender", {}).get("id", "")
+                    m_type = m.get("msg_type", "")
+                    c_time = m.get("create_time")
+                    d_str = timestamp_to_datetime(c_time, with_seconds=True)
+
+                    if sid.startswith("cli_"):
+                        bot_name = m.get("sender", {}).get("name", "") or "机器人"
+                        s_name = f"🤖 {bot_name}"
+                    elif m_type == "system":
+                        s_name = "系统"
+                    else:
+                        s_name = speaker_names.get(sid, sid or "成员")
+
+                    # 提取该消息关联的 asset_map: file_key -> rel_path
+                    m_assets = {}
+                    for r in extract_resource_keys(m):
+                        fk = r.get("file_key")
+                        if fk and fk in downloaded_assets:
+                            m_assets[fk] = downloaded_assets[fk]
+
+                    record_id = record_ids[i] if i < len(record_ids) else None
+                    m_skipped = skipped_notes.get(record_id) if record_id else None
+
+                    block = local_cache.format_message_to_markdown(
+                        m, s_name, d_str, asset_map=m_assets, skipped_notes=m_skipped
+                    )
+                    md_blocks.append(block)
+
+                local_cache.append_messages_to_cache(chat_id, chat_name, md_blocks)
+            except Exception as ce:
+                print(f"[local_cache] 写入 Markdown 失败: {ce}")
+
         # 8. 更新同步状态
         new_last_position = int(messages[-1].get("message_position") or 0)
         new_record_count = (chat_config.get("record_count", 0) or 0) + len(messages)
@@ -535,6 +764,7 @@ def _run_sync(user_id, chat_id):
         if not chat_config.get("chat_name"):
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
 
+        has_cache_now = local_cache.has_cache(chat_id, chat_name)
         result = {
             "ok": True,
             "new_count": len(messages),
@@ -542,12 +772,16 @@ def _run_sync(user_id, chat_id):
             "skipped_count": skipped_count,
             "total_records": new_record_count,
             "base_url": base_url,
+            "local_cache": is_local_cache_enabled,
+            "has_cache": has_cache_now,
         }
+        cache_suffix = "（已保存至本地 Markdown 缓存）" if is_local_cache_enabled else ""
         _set_progress(chat_id, stage="done", running=False,
                       current=total, total=total,
                       message=f"同步完成：新增 {len(messages)} 条消息" +
                               (f"，附件 {attach_count} 个" if attach_count > 0 else "") +
-                              (f"，跳过大附件 {skipped_count} 个" if skipped_count > 0 else ""),
+                              (f"，跳过大附件 {skipped_count} 个" if skipped_count > 0 else "") +
+                              cache_suffix,
                       result=result)
 
     except Exception as e:
@@ -593,7 +827,174 @@ LOGIN_PAGE = """
 </html>
 """
 
-INDEX_PAGE = """
+VIEW_PAGE = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ chat_name }} - 本地 Markdown 预览</title>
+    <!-- Marked Markdown 解析引擎 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif; background: #f5f6f8; color: #1f2329; }
+        .top-nav { background: white; border-bottom: 1px solid #e5e6eb; padding: 12px 32px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 50; box-shadow: 0 1px 4px rgba(0,0,0,0.03); }
+        .nav-left { display: flex; align-items: center; gap: 14px; }
+        .btn-back { display: inline-flex; align-items: center; gap: 6px; color: #4e5969; text-decoration: none; font-size: 13px; padding: 6px 12px; border-radius: 6px; background: #f2f3f5; font-weight: 500; transition: all 0.2s; }
+        .btn-back:hover { background: #e5e6eb; color: #1f2329; }
+        .chat-title { font-size: 16px; font-weight: 600; color: #1f2329; }
+        .nav-right { display: flex; align-items: center; gap: 10px; }
+        .nav-btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 15px; border-radius: 6px; font-size: 13px; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; border: none; }
+        .btn-raw { background: #f2f3f5; color: #1f2329; }
+        .btn-raw:hover { background: #e5e6eb; }
+        .btn-zip { background: #3370ff; color: white; }
+        .btn-zip:hover { background: #2860e1; }
+        .container { max-width: 920px; margin: 24px auto; padding: 0 20px; }
+        .meta-card { background: white; border-radius: 12px; padding: 16px 22px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+        .meta-items { display: flex; gap: 18px; font-size: 13px; color: #646a73; flex-wrap: wrap; }
+        .meta-item { display: flex; align-items: center; gap: 6px; }
+        .meta-item b { color: #1f2329; font-weight: 600; }
+        .md-card { background: white; border-radius: 12px; padding: 36px 40px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); line-height: 1.75; font-size: 14.5px; }
+        
+        /* Markdown 样式 */
+        .md-card h1 { font-size: 22px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e6eb; color: #1f2329; }
+        .md-card h2 { font-size: 18px; margin: 24px 0 14px; color: #1f2329; }
+        .md-card h3 { font-size: 15px; margin: 18px 0 10px; color: #1f2329; }
+        .md-card hr { border: none; height: 1px; background: #e5e6eb; margin: 24px 0; }
+        .md-card p { margin-bottom: 12px; word-break: break-word; }
+        .md-card blockquote { border-left: 4px solid #3370ff; padding: 10px 16px; background: #f7f9fd; color: #4e5969; border-radius: 0 6px 6px 0; margin-bottom: 14px; }
+        .md-card code { font-family: 'SF Mono', Consolas, Monaco, monospace; background: #f2f3f5; padding: 2px 6px; border-radius: 4px; font-size: 12.5px; color: #1f2329; }
+        .md-card pre { background: #1e1e1e; color: #d4d4d4; padding: 14px 18px; border-radius: 8px; overflow-x: auto; margin: 14px 0; font-family: 'SF Mono', Consolas, Monaco, monospace; font-size: 13px; line-height: 1.5; }
+        .md-card pre code { background: transparent; color: inherit; padding: 0; }
+        .md-card img { max-width: 100%; max-height: 480px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin: 10px 0; cursor: zoom-in; transition: transform 0.2s, box-shadow 0.2s; display: inline-block; vertical-align: middle; }
+        .md-card img:hover { transform: scale(1.01); box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
+        .md-card a { color: #3370ff; text-decoration: none; word-break: break-all; }
+        .md-card a:hover { text-decoration: underline; }
+        
+        /* 附件下载卡片样式 */
+        .attachment-card { display: inline-flex; align-items: center; gap: 10px; background: #f7f8fa; border: 1px solid #dee0e3; border-radius: 8px; padding: 10px 16px; text-decoration: none !important; color: #1f2329 !important; font-size: 13.5px; margin: 8px 0; font-weight: 500; transition: all 0.2s; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
+        .attachment-card:hover { background: #e8f3ff; border-color: #3370ff; color: #3370ff !important; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(51,112,255,0.12); }
+        .attachment-card .icon { font-size: 18px; line-height: 1; }
+        .attachment-card .action-tag { font-size: 12px; color: #3370ff; background: #e8f3ff; padding: 2px 8px; border-radius: 4px; margin-left: 6px; }
+        
+        /* Lightbox 灯箱大图预览 */
+        .lightbox-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; justify-content: center; align-items: center; z-index: 1000; padding: 24px; backdrop-filter: blur(4px); }
+        .lightbox-modal.show { display: flex; }
+        .lightbox-modal img { max-width: 92vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.5); object-fit: contain; }
+        .lightbox-actions { position: fixed; top: 20px; right: 24px; display: flex; gap: 12px; z-index: 1001; }
+        .lightbox-btn { background: rgba(255,255,255,0.2); color: white; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; text-decoration: none; transition: background 0.2s; backdrop-filter: blur(8px); }
+        .lightbox-btn:hover { background: rgba(255,255,255,0.35); }
+        .empty-tip { text-align: center; padding: 60px; color: #86909c; }
+    </style>
+</head>
+<body>
+    <div class="top-nav">
+        <div class="nav-left">
+            <a href="/" class="btn-back">← 返回控制台</a>
+            <span class="chat-title">{{ chat_name }}</span>
+        </div>
+        <div class="nav-right">
+            <a href="/cache/{{ chat_id }}/raw" class="nav-btn btn-raw" target="_blank" title="在新窗口查看/下载原始 Markdown">📄 下载 Markdown</a>
+            <a href="/cache/{{ chat_id }}/download" class="nav-btn btn-zip" title="打包下载包含 Markdown 和附件的完整压缩包">📦 打包下载 (ZIP)</a>
+        </div>
+    </div>
+
+    <div class="container">
+        {% if has_cache %}
+        <div class="meta-card">
+            <div class="meta-items">
+                <div class="meta-item"><span>群聊 ID:</span> <code>{{ chat_id }}</code></div>
+                {% if info.updated_at %}<div class="meta-item"><span>更新时间:</span> <b>{{ info.updated_at }}</b></div>{% endif %}
+                {% if info.asset_count is defined %}<div class="meta-item"><span>已缓存附件:</span> <b>{{ info.asset_count }} 个</b></div>{% endif %}
+                {% if info.total_size %}<div class="meta-item"><span>总大小:</span> <b>{{ (info.total_size / 1024 / 1024)|round(2) if info.total_size > 1048576 else (info.total_size / 1024)|round(1) }} {{ 'MB' if info.total_size > 1048576 else 'KB' }}</b></div>{% endif %}
+            </div>
+        </div>
+        <div class="md-card" id="mdContent">
+            <!-- Markdown 渲染目标容器 -->
+        </div>
+        {% else %}
+        <div class="md-card empty-tip">
+            <h2>暂无本地缓存数据</h2>
+            <p style="margin-top:12px; font-size:14px; color:#646a73;">该群聊尚未开启本地缓存或尚未进行同步。</p>
+            <div style="margin-top:24px;"><a href="/" class="nav-btn btn-zip">返回开启并同步</a></div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Lightbox 图片灯箱模态框 -->
+    <div class="lightbox-modal" id="lightboxModal" onclick="closeLightbox()">
+        <div class="lightbox-actions" onclick="event.stopPropagation()">
+            <a href="#" id="lightboxExtBtn" target="_blank" class="lightbox-btn">在新标签页打开</a>
+            <button class="lightbox-btn" onclick="closeLightbox()">关闭 (Esc)</button>
+        </div>
+        <img id="lightboxImg" src="" alt="大图预览" onclick="event.stopPropagation()">
+    </div>
+
+    <script>
+        const rawMarkdown = {{ raw_markdown | tojson }};
+        const chatId = {{ chat_id | tojson }};
+
+        if (rawMarkdown && document.getElementById('mdContent')) {
+            const renderer = new marked.Renderer();
+            
+            // 自定义图片渲染：相对路径转换为 /cache/<chat_id>/assets/，点击打开灯箱
+            renderer.image = function(token) {
+                let href = typeof token === 'object' ? (token.href || '') : token;
+                let text = typeof token === 'object' ? (token.text || '图片') : (arguments[2] || '图片');
+                let src = href;
+                if (src.startsWith('assets/')) {
+                    src = '/cache/' + chatId + '/' + src;
+                }
+                return '<img src="' + src + '" alt="' + text + '" onclick="openLightbox(\'' + src + '\')" title="点击放大查看大图" loading="lazy">';
+            };
+
+            // 自定义链接渲染：检测附件链接，美化为可直接下载的卡片
+            renderer.link = function(token) {
+                let href = typeof token === 'object' ? (token.href || '') : token;
+                let text = typeof token === 'object' ? (token.text || href) : (arguments[2] || href);
+                let url = href;
+                if (url.startsWith('assets/')) {
+                    url = '/cache/' + chatId + '/' + url;
+                    return '<a href="' + url + '?download=1" download class="attachment-card" title="点击直接下载文件"><span class="icon">📎</span><span>' + text + '</span><span class="action-tag">点击下载</span></a>';
+                }
+                return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+            };
+
+            marked.setOptions({
+                renderer: renderer,
+                breaks: true,
+                gfm: true
+            });
+
+            document.getElementById('mdContent').innerHTML = marked.parse(rawMarkdown);
+        }
+
+        function openLightbox(src) {
+            const modal = document.getElementById('lightboxModal');
+            const img = document.getElementById('lightboxImg');
+            const extBtn = document.getElementById('lightboxExtBtn');
+            img.src = src;
+            extBtn.href = src;
+            modal.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeLightbox() {
+            const modal = document.getElementById('lightboxModal');
+            modal.classList.remove('show');
+            document.body.style.overflow = '';
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeLightbox();
+        });
+    </script>
+</body>
+</html>
+"""
+
+INDEX_PAGE = r"""
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -679,6 +1080,19 @@ INDEX_PAGE = """
         .sync-progress .bar { height: 100%; background: linear-gradient(90deg, #3370ff, #00b42a); border-radius: 3px; width: 0%; transition: width 0.3s; }
         .sync-progress.error .bar { background: #f53f3f; }
         .sync-progress.done .bar { background: #00b42a; }
+        /* 本地缓存增强样式 */
+        .chat-item.is-clickable { cursor: pointer; }
+        .chat-item.is-clickable:hover { border-color: #b3ccff; box-shadow: 0 4px 16px rgba(51,112,255,0.08); }
+        .name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+        .preview-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #e8f3ff; color: #3370ff; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; }
+        .preview-tag:hover { background: #3370ff; color: white; }
+        .link-cache { color: #3370ff; text-decoration: none; font-size: 12px; font-weight: 500; }
+        .link-cache:hover { text-decoration: underline; }
+        .cache-toggle-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #4e5969; cursor: pointer; user-select: none; background: #f2f3f5; padding: 3px 9px; border-radius: 6px; transition: background 0.2s; }
+        .cache-toggle-wrap:hover { background: #e5e6eb; }
+        .cache-toggle-wrap input { cursor: pointer; margin: 0; }
+        .checkbox-row { margin-top: 12px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4e5969; }
+        .checkbox-row input { cursor: pointer; width: 15px; height: 15px; }
     </style>
 </head>
 <body>
@@ -698,29 +1112,48 @@ INDEX_PAGE = """
                 <input type="text" id="chatNameInput" placeholder="群聊名称（可选，留空自动获取）" style="flex:1; min-width:160px;" />
                 <button onclick="addChat()">添加</button>
             </div>
+            <div class="checkbox-row">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                    <input type="checkbox" id="localCacheCheckbox" checked>
+                    <span>开启本地缓存（同步时自动将文字存为 Markdown 并下载图片和附件）</span>
+                </label>
+            </div>
         </div>
         <div class="section-title">已配置群聊</div>
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
-                <div class="chat-item" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}">
-                    <div class="chat-info">
-                        <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
+                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}">
+                    <div class="chat-info" {% if chat.has_cache %}onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览"{% endif %}>
+                        <div class="name-row">
+                            <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
+                            {% if chat.has_cache %}
+                            <span class="preview-tag" onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览">📑 预览归档</span>
+                            {% endif %}
+                        </div>
                         <div class="meta" id="meta-{{ chat.chat_id }}">
                             <span class="id">{{ chat.chat_id }}</span>
                             {% if chat.record_count %}<span class="dot">·</span><span>已同步 <span class="record-count">{{ chat.record_count }}</span> 条</span>{% endif %}
-                            {% if chat.base_url %}<span class="dot">·</span><a href="{{ chat.base_url }}" target="_blank">查看表格</a>{% endif %}
+                            {% if chat.base_url %}<span class="dot">·</span><a href="{{ chat.base_url }}" target="_blank" onclick="event.stopPropagation()">查看表格</a>{% endif %}
+                            {% if chat.has_cache %}
+                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/view" target="_blank" onclick="event.stopPropagation()" class="link-cache">在线预览</a>
+                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/download" onclick="event.stopPropagation()" class="link-cache">下载ZIP</a>
+                            {% endif %}
                         </div>
                         <div class="stats-row">
                             <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
                             <span class="badge badge-syncing" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text">同步中</span></span>
+                            <label class="cache-toggle-wrap" onclick="event.stopPropagation()" title="开启后，同步时自动保存 Markdown 记录并下载图片和附件">
+                                <input type="checkbox" id="toggle-{{ chat.chat_id }}" onchange="toggleLocalCache('{{ chat.chat_id }}', this.checked)" {% if chat.local_cache %}checked{% endif %}>
+                                <span>本地缓存</span>
+                            </label>
                         </div>
                         <div class="sync-progress" id="progress-{{ chat.chat_id }}">
                             <div class="stage">准备中...</div>
                             <div class="bar-wrap"><div class="bar"></div></div>
                         </div>
                     </div>
-                    <div class="chat-actions">
+                    <div class="chat-actions" onclick="event.stopPropagation()">
                         <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
                         <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}')">删除</button>
                     </div>
@@ -760,16 +1193,45 @@ INDEX_PAGE = """
             setTimeout(() => toast.className = 'toast ' + type, 3000);
         }
 
+        function openCacheView(chatId, e) {
+            if (e) e.stopPropagation();
+            window.location.href = '/cache/' + chatId + '/view';
+        }
+
+        async function toggleLocalCache(chatId, enabled) {
+            try {
+                const resp = await fetch('/api/chats/' + chatId + '/toggle_cache', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enabled })
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    showToast(enabled ? '已开启该群本地缓存' : '已关闭该群本地缓存', 'success');
+                } else {
+                    showToast(data.error || '切换失败', 'error');
+                }
+            } catch (err) {
+                showToast('网络请求异常', 'error');
+            }
+        }
+
         async function addChat() {
             const input = document.getElementById('chatIdInput');
             const nameInput = document.getElementById('chatNameInput');
+            const localCacheBox = document.getElementById('localCacheCheckbox');
             const chatId = input.value.trim();
             if (!chatId) return;
             const chatName = nameInput.value.trim();
+            const localCache = localCacheBox ? localCacheBox.checked : true;
             const resp = await fetch('/api/chats', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId, chat_name: chatName || undefined }),
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    chat_name: chatName || undefined,
+                    local_cache: localCache
+                }),
             });
             const data = await resp.json();
             if (data.ok) {
@@ -906,6 +1368,36 @@ INDEX_PAGE = """
                 const m = statsEl.textContent.match(/(\d+)\s*\/\s*(\d+)/);
                 const totalInStats = m ? parseInt(m[2]) : total;
                 statsEl.textContent = '已同步 ' + total + ' / ' + totalInStats + ' 条';
+            }
+
+            // 若已有本地缓存，实时给卡片赋予预览交互及快捷链接
+            if (result.has_cache) {
+                const item = document.getElementById('chat-' + chatId);
+                if (item) {
+                    if (!item.classList.contains('is-clickable')) {
+                        item.classList.add('is-clickable');
+                        const infoEl = item.querySelector('.chat-info');
+                        if (infoEl) {
+                            infoEl.setAttribute('onclick', "openCacheView('" + chatId + "', event)");
+                            infoEl.title = '点击进入 Markdown 预览';
+                        }
+                    }
+                    const nameRow = item.querySelector('.name-row');
+                    if (nameRow && !nameRow.querySelector('.preview-tag')) {
+                        const tag = document.createElement('span');
+                        tag.className = 'preview-tag';
+                        tag.textContent = '📑 预览归档';
+                        tag.title = '点击进入 Markdown 预览';
+                        tag.onclick = (e) => openCacheView(chatId, e);
+                        nameRow.appendChild(tag);
+                    }
+                    if (!meta.querySelector('.link-cache')) {
+                        const cLink = document.createElement('span');
+                        cLink.innerHTML = '<span class="dot">·</span><a href="/cache/' + chatId + '/view" target="_blank" class="link-cache" onclick="event.stopPropagation()">在线预览</a>' +
+                                          '<span class="dot">·</span><a href="/cache/' + chatId + '/download" class="link-cache" onclick="event.stopPropagation()">下载ZIP</a>';
+                        meta.appendChild(cLink);
+                    }
+                }
             }
         }
 

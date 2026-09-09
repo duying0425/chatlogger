@@ -27,6 +27,10 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-this-to-a-random-secret-key")
     # 数据库文件路径
     DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "chatlogger.db"))
+    # 本地缓存目录路径
+    LOCAL_CACHE_DIR = os.environ.get("LOCAL_CACHE_DIR", os.path.join(os.path.dirname(__file__), "cache"))
+    # 默认是否开启本地缓存（添加新群时默认状态）
+    DEFAULT_LOCAL_CACHE = os.environ.get("DEFAULT_LOCAL_CACHE", "true").lower() in ("true", "1", "yes")
 
     # 服务器配置
     HOST = os.environ.get("HOST", "0.0.0.0")
