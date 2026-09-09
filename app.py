@@ -834,8 +834,14 @@ VIEW_PAGE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ chat_name }} - 本地 Markdown 预览</title>
-    <!-- Marked Markdown 解析引擎 -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 优先加载本地托管的 Marked 引擎（无需外网，毫秒级响应且 100% 稳定可靠） -->
+    <script src="/static/marked.min.js?v=15.0.12"></script>
+    <script>
+        // 本地静态资源降级备选（国内 BootCDN）
+        if (typeof marked === 'undefined') {
+            document.write('<scr' + 'ipt src="https://cdn.bootcdn.net/ajax/libs/marked/15.0.12/marked.min.js"></scr' + 'ipt>');
+        }
+    </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif; background: #f5f6f8; color: #1f2329; }
@@ -932,42 +938,81 @@ VIEW_PAGE = """
     </div>
 
     <script>
-        const rawMarkdown = {{ raw_markdown | tojson }};
-        const chatId = {{ chat_id | tojson }};
+        function renderContent() {
+            const rawMarkdown = {{ raw_markdown | tojson }};
+            const chatId = {{ chat_id | tojson }};
+            const mdContainer = document.getElementById('mdContent');
+            if (!mdContainer) return;
 
-        if (rawMarkdown && document.getElementById('mdContent')) {
-            const renderer = new marked.Renderer();
-            
-            // 自定义图片渲染：相对路径转换为 /cache/<chat_id>/assets/，点击打开灯箱
-            renderer.image = function(token) {
-                let href = typeof token === 'object' ? (token.href || '') : token;
-                let text = typeof token === 'object' ? (token.text || '图片') : (arguments[2] || '图片');
-                let src = href;
-                if (src.startsWith('assets/')) {
-                    src = '/cache/' + chatId + '/' + src;
+            if (!rawMarkdown) {
+                return;
+            }
+
+            if (typeof marked !== 'undefined') {
+                try {
+                    const renderer = new marked.Renderer();
+
+                    // 自定义图片渲染：相对路径转换为 /cache/<chat_id>/assets/，点击打开灯箱
+                    renderer.image = function(token) {
+                        var href = (typeof token === 'object' && token) ? (token.href || '') : String(token || '');
+                        var text = (typeof token === 'object' && token) ? (token.text || '图片') : (arguments[2] || '图片');
+                        var src = href;
+                        if (src.startsWith('./assets/')) {
+                            src = '/cache/' + encodeURIComponent(chatId) + '/' + src.substring(2);
+                        } else if (src.startsWith('assets/')) {
+                            src = '/cache/' + encodeURIComponent(chatId) + '/' + src;
+                        }
+                        return '<img src="' + src + '" alt="' + text + '" onclick="openLightbox(this.src)" title="点击放大查看大图" loading="lazy">';
+                    };
+
+                    // 自定义链接渲染：检测附件链接，美化为可直接下载的卡片
+                    renderer.link = function(token) {
+                        var href = (typeof token === 'object' && token) ? (token.href || '') : String(token || '');
+                        var text = (typeof token === 'object' && token) ? (token.text || href) : (arguments[2] || href);
+                        var url = href;
+                        if (url.startsWith('./assets/')) {
+                            url = '/cache/' + encodeURIComponent(chatId) + '/' + url.substring(2);
+                            return '<a href="' + url + '?download=1" download class="attachment-card" title="点击直接下载文件"><span class="icon">📎</span><span>' + text + '</span><span class="action-tag">点击下载</span></a>';
+                        } else if (url.startsWith('assets/')) {
+                            url = '/cache/' + encodeURIComponent(chatId) + '/' + url;
+                            return '<a href="' + url + '?download=1" download class="attachment-card" title="点击直接下载文件"><span class="icon">📎</span><span>' + text + '</span><span class="action-tag">点击下载</span></a>';
+                        }
+                        return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+                    };
+
+                    if (typeof marked.setOptions === 'function') {
+                        marked.setOptions({
+                            renderer: renderer,
+                            breaks: true,
+                            gfm: true
+                        });
+                    }
+
+                    var parseFn = typeof marked.parse === 'function' ? marked.parse : marked;
+                    mdContainer.innerHTML = parseFn(rawMarkdown);
+                    return;
+                } catch (err) {
+                    console.error('Marked render failed, falling back to text:', err);
                 }
-                return '<img src="' + src + '" alt="' + text + '" onclick="openLightbox(\'' + src + '\')" title="点击放大查看大图" loading="lazy">';
-            };
+            }
 
-            // 自定义链接渲染：检测附件链接，美化为可直接下载的卡片
-            renderer.link = function(token) {
-                let href = typeof token === 'object' ? (token.href || '') : token;
-                let text = typeof token === 'object' ? (token.text || href) : (arguments[2] || href);
-                let url = href;
-                if (url.startsWith('assets/')) {
-                    url = '/cache/' + chatId + '/' + url;
-                    return '<a href="' + url + '?download=1" download class="attachment-card" title="点击直接下载文件"><span class="icon">📎</span><span>' + text + '</span><span class="action-tag">点击下载</span></a>';
-                }
-                return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
-            };
+            // 降级兜底渲染：格式化纯文本
+            renderFallback(rawMarkdown, mdContainer);
+        }
 
-            marked.setOptions({
-                renderer: renderer,
-                breaks: true,
-                gfm: true
-            });
+        function renderFallback(rawText, container) {
+            var warningBanner = '<div style="background:#fffbe6; border:1px solid #ffe58f; padding:10px 16px; border-radius:8px; margin-bottom:18px; font-size:13px; color:#d48806;">⚠️ Markdown 渲染脚本暂未就绪，已切换为结构化纯文本预览模式。</div>';
+            var escaped = rawText
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            container.innerHTML = warningBanner + '<pre style="white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 14.5px; line-height: 1.75; background: transparent; color: inherit; padding: 0;">' + escaped + '</pre>';
+        }
 
-            document.getElementById('mdContent').innerHTML = marked.parse(rawMarkdown);
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', renderContent);
+        } else {
+            renderContent();
         }
 
         function openLightbox(src) {

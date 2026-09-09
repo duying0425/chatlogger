@@ -1,10 +1,13 @@
 import os
+import sys
 import shutil
 import tempfile
 import unittest
 import zipfile
 import io
 import json
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 
 # 使用独立临时数据库和临时缓存目录测试
@@ -300,6 +303,37 @@ class LocalCacheTestSuite(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(chat_dir, "assets", "img_sync_01.jpg")))
         self.assertTrue(os.path.exists(os.path.join(chat_dir, "assets", "API设计文档.docx")))
 
+    def test_cache_view_and_static_marked(self):
+        """验证本地托管 marked.min.js 以及在线预览页面模板输出"""
+        client = app.test_client()
+
+        # 1. 验证静态资源 /static/marked.min.js 能正确返回
+        resp_static = client.get("/static/marked.min.js")
+        self.assertEqual(resp_static.status_code, 200)
+        self.assertGreater(len(resp_static.data), 30000)
+        self.assertIn(b"marked", resp_static.data)
+
+        # 2. 模拟添加群聊与本地缓存
+        models.add_chat(self.user["id"], self.chat_id, self.chat_name, local_cache=1)
+        local_cache.append_messages_to_cache(
+            self.chat_id,
+            self.chat_name,
+            ["### [2026-09-09 15:00:00] 王五:\n测试预览"]
+        )
+
+        # 3. 登录并访问 /cache/<chat_id>/view 页面
+        with client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+        resp_view = client.get(f"/cache/{self.chat_id}/view")
+        self.assertEqual(resp_view.status_code, 200)
+        html = resp_view.data.decode("utf-8")
+
+        # 验证引用了本地托管的 marked.min.js 且包含安全渲染脚本与兜底逻辑
+        self.assertIn("/static/marked.min.js", html)
+        self.assertIn("openLightbox(this.src)", html)
+        self.assertIn("renderFallback", html)
+        # raw_markdown 在模板中通过 tojson 转义为 Unicode 转义字符串
+        self.assertTrue("测试预览" in html or json.dumps("测试预览")[1:-1] in html)
 
 
 if __name__ == "__main__":
