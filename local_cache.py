@@ -381,3 +381,26 @@ def build_cache_zip(chat_id, chat_name=None):
     memory_file.seek(0)
     return memory_file, zip_filename
 
+
+def delete_cache(chat_id, chat_name=None):
+    """删除指定群聊的本地缓存目录及全部文件。
+    安全防范：严格限制在 Config.LOCAL_CACHE_DIR 目录下删除，匹配 _{chat_id} 或 {chat_id}。
+    """
+    base_dir = os.path.abspath(Config.LOCAL_CACHE_DIR)
+    if not os.path.exists(base_dir):
+        return False
+
+    deleted = False
+    for entry in os.listdir(base_dir):
+        full_entry = os.path.abspath(os.path.join(base_dir, entry))
+        if not full_entry.startswith(base_dir):
+            continue
+        if os.path.isdir(full_entry) and (entry.endswith(f"_{chat_id}") or entry == chat_id):
+            try:
+                shutil.rmtree(full_entry)
+                deleted = True
+            except Exception as e:
+                print(f"[local_cache] 删除缓存目录 {full_entry} 失败: {e}")
+
+    return deleted
+

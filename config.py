@@ -31,6 +31,8 @@ class Config:
     LOCAL_CACHE_DIR = os.environ.get("LOCAL_CACHE_DIR", os.path.join(os.path.dirname(__file__), "cache"))
     # 默认是否开启本地缓存（添加新群时默认状态）
     DEFAULT_LOCAL_CACHE = os.environ.get("DEFAULT_LOCAL_CACHE", "true").lower() in ("true", "1", "yes")
+    # 单个附件/图片大小上限（MB），超出自动在备注中记录跳过（默认 20MB）
+    MAX_ATTACHMENT_SIZE_MB = int(os.environ.get("MAX_ATTACHMENT_SIZE_MB", "20"))
 
     # 服务器配置
     HOST = os.environ.get("HOST", "0.0.0.0")

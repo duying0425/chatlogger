@@ -1,0 +1,17 @@
+services:
+  chatlogger:
+    build: .
+    image: chatlogger:latest
+    container_name: chatlogger
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/chatlogger.db
+      - LOCAL_CACHE_DIR=/app/cache
+    volumes:
+      - ./data:/app/data
+      - ./cache:/app/cache
+

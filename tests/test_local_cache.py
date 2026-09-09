@@ -335,6 +335,60 @@ class LocalCacheTestSuite(unittest.TestCase):
         # raw_markdown 在模板中通过 tojson 转义为 Unicode 转义字符串
         self.assertTrue("测试预览" in html or json.dumps("测试预览")[1:-1] in html)
 
+    def test_delete_cache_and_api(self):
+        """测试本地缓存物理删除及 API 联动"""
+        test_chat_id = "oc_del_test_001"
+        test_chat_name = "待删除测试群"
+        models.add_chat(self.user["id"], test_chat_id, test_chat_name, local_cache=1)
+
+        # 1. 写入缓存数据与附件
+        local_cache.append_messages_to_cache(test_chat_id, test_chat_name, ["### 消息内容"])
+        local_cache.save_asset(test_chat_id, test_chat_name, b"image-data", "photo.png", "img_001")
+        self.assertTrue(local_cache.has_cache(test_chat_id, test_chat_name))
+
+        # 2. 直接调用 local_cache.delete_cache
+        res = local_cache.delete_cache(test_chat_id, test_chat_name)
+        self.assertTrue(res)
+        self.assertFalse(local_cache.has_cache(test_chat_id, test_chat_name))
+
+        # 3. 重新写入并测试 DELETE API 联动清理
+        local_cache.append_messages_to_cache(test_chat_id, test_chat_name, ["### 再次生成"])
+        self.assertTrue(local_cache.has_cache(test_chat_id, test_chat_name))
+
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+
+        # 调用 DELETE /api/chats/<id>?delete_cache=true
+        resp = client.delete(f"/api/chats/{test_chat_id}?delete_cache=true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["ok"])
+
+        # 数据库中已删除
+        self.assertIsNone(models.get_chat(self.user["id"], test_chat_id))
+        # 磁盘上缓存已清理
+        self.assertFalse(local_cache.has_cache(test_chat_id, test_chat_name))
+
+    def test_max_attachment_size_config(self):
+        """测试附件大小上限环境变量配置及动态异常提示"""
+        from feishu import FeishuClient, SizeExceededError
+        from unittest.mock import patch, MagicMock
+
+        # 验证默认配置为 20MB
+        self.assertEqual(Config.MAX_ATTACHMENT_SIZE_MB, 20)
+
+        # 模拟下载时超限（设置上限为 10MB，资源为 15MB）
+        client = FeishuClient("test_access", "test_refresh", 9999999999, 9999999999, user_id=self.user["id"])
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Length": str(15 * 1024 * 1024)}
+
+        with patch("feishu._request_with_retry", return_value=mock_resp):
+            with self.assertRaises(SizeExceededError) as ctx:
+                client.download_resource("msg_1", "file_1", max_size_mb=10)
+            self.assertIn("10MB", str(ctx.exception))
+            self.assertIn("15MB", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

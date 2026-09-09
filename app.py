@@ -272,8 +272,12 @@ def api_delete_chat(chat_id):
 
     # query 参数 delete_base=true 时同时删除飞书多维表格
     delete_base = request.args.get("delete_base") == "true"
+    # query 参数 delete_cache=true 时同时物理删除本地缓存目录
+    delete_cache = request.args.get("delete_cache") == "true"
 
     chat_config = models.get_chat(user["id"], chat_id)
+    chat_name = chat_config.get("chat_name") if chat_config else None
+
     if delete_base and chat_config and chat_config.get("base_token"):
         client = get_feishu_client()
         if client:
@@ -282,6 +286,12 @@ def api_delete_chat(chat_id):
             except Exception as e:
                 # 表格删除失败不阻断配置删除，仅返回警告
                 return jsonify({"error": f"删除飞书表格失败: {e}"}), 500
+
+    if delete_cache:
+        try:
+            local_cache.delete_cache(chat_id, chat_name)
+        except Exception as e:
+            print(f"[local_cache] 删除群聊缓存失败: {e}")
 
     models.delete_chat(user["id"], chat_id)
     return jsonify({"ok": True})
@@ -664,6 +674,7 @@ def _run_sync(user_id, chat_id):
                         try:
                             file_content, filename = client.download_resource(
                                 r["message_id"], r["file_key"], r["type"],
+                                max_size_mb=Config.MAX_ATTACHMENT_SIZE_MB,
                                 original_filename=r.get("file_name", "")
                             )
                             # 若开启本地缓存，保存文件至 cache/{chat}/assets/
@@ -1118,6 +1129,12 @@ INDEX_PAGE = r"""
         .modal-btns .btn-only-config:hover { background: #2860e1; }
         .modal-btns .btn-delete-all { background: #f53f3f; color: white; }
         .modal-btns .btn-delete-all:hover { background: #d93636; }
+        .delete-cache-box { margin: 16px 0 20px; padding: 12px 14px; background: #f7f8fa; border: 1px solid #dee0e3; border-radius: 8px; text-align: left; }
+        .delete-cache-label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #1f2329; cursor: pointer; user-select: none; }
+        .delete-cache-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: #f53f3f; }
+        .delete-cache-label.disabled { color: #8f959e; cursor: not-allowed; }
+        .delete-cache-label.disabled input[type="checkbox"] { cursor: not-allowed; }
+        .delete-cache-tip { font-size: 12px; color: #86909c; margin-top: 5px; padding-left: 24px; line-height: 1.4; }
         /* 同步进度条 */
         .sync-progress { margin-top: 10px; display: none; }
         .sync-progress .stage { font-size: 12px; color: #4e5969; margin-bottom: 6px; line-height: 1.4; }
@@ -1220,6 +1237,7 @@ INDEX_PAGE = r"""
                     <div class="chat-actions" onclick="event.stopPropagation()">
                         <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
                         <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}')">删除</button>
+                        <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                     </div>
                 </div>
                 {% endfor %}
@@ -1233,6 +1251,13 @@ INDEX_PAGE = r"""
         <div class="modal">
             <h3>删除群聊配置</h3>
             <p>请选择删除方式：<br>「仅删配置」：飞书多维表格中的数据会保留。<br>「同时删表格」：将一并删除已同步的飞书多维表格，此操作不可恢复。</p>
+            <div class="delete-cache-box">
+                <label id="deleteCacheLabel" class="delete-cache-label">
+                    <input type="checkbox" id="deleteCacheCheck">
+                    <span>同时删除本地缓存文件（Markdown 与附件）</span>
+                </label>
+                <div class="delete-cache-tip" id="deleteCacheTip"></div>
+            </div>
             <div class="modal-btns">
                 <button class="btn-cancel" onclick="closeDeleteModal()">取消</button>
                 <button class="btn-only-config" onclick="doDelete(false)">仅删配置</button>
@@ -1336,18 +1361,39 @@ INDEX_PAGE = r"""
         }
 
         let pendingDeleteChatId = null;
-        function deleteChat(chatId) {
+        function deleteChat(chatId, hasCache) {
             pendingDeleteChatId = chatId;
+            const check = document.getElementById('deleteCacheCheck');
+            const label = document.getElementById('deleteCacheLabel');
+            const tip = document.getElementById('deleteCacheTip');
+
+            if (hasCache) {
+                check.checked = true;
+                check.disabled = false;
+                label.classList.remove('disabled');
+                label.title = '';
+                tip.textContent = '检测到该群存在本地 Markdown 与附件缓存，默认同步清理。';
+            } else {
+                check.checked = false;
+                check.disabled = true;
+                label.classList.add('disabled');
+                label.title = '该群聊暂无本地缓存文件';
+                tip.textContent = '该群聊暂无本地缓存文件，无需清理。';
+            }
+
             document.getElementById('deleteModal').classList.add('show');
         }
+
         function closeDeleteModal() {
             pendingDeleteChatId = null;
             document.getElementById('deleteModal').classList.remove('show');
         }
+
         async function doDelete(deleteBase) {
             const chatId = pendingDeleteChatId;
             if (!chatId) return;
-            const url = '/api/chats/' + chatId + (deleteBase ? '?delete_base=true' : '');
+            const deleteCache = document.getElementById('deleteCacheCheck').checked && !document.getElementById('deleteCacheCheck').disabled;
+            const url = '/api/chats/' + chatId + '?delete_base=' + (deleteBase ? 'true' : 'false') + '&delete_cache=' + (deleteCache ? 'true' : 'false');
             try {
                 const resp = await fetch(url, { method: 'DELETE' });
                 const data = await resp.json();

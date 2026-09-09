@@ -251,10 +251,12 @@ class FeishuClient:
 
     # ===== 资源下载 =====
 
-    def download_resource(self, message_id, file_key, resource_type="image", max_size_mb=20, original_filename=""):
+    def download_resource(self, message_id, file_key, resource_type="image", max_size_mb=None, original_filename=""):
         """下载消息中的图片或文件，返回字节流。
-        超过 max_size_mb 则抛出 SizeExceededError（飞书 upload_all 限制 20MB）。
+        超过 max_size_mb 则抛出 SizeExceededError（默认从 Config.MAX_ATTACHMENT_SIZE_MB 读取）。
         文件名优先级：original_filename > Content-Disposition > file_key + 扩展名"""
+        if max_size_mb is None:
+            max_size_mb = getattr(Config, "MAX_ATTACHMENT_SIZE_MB", 20)
         url = f"{Config.API_BASE}/im/v1/messages/{message_id}/resources/{file_key}"
         params = {"type": resource_type}
         # stream 下载：parse_json=False 让重试逻辑只判断 HTTP 状态码
@@ -266,7 +268,7 @@ class FeishuClient:
             raise Exception(f"下载资源失败: HTTP {resp.status_code}")
         content_length = int(resp.headers.get("Content-Length", 0))
         if content_length > max_size_mb * 1024 * 1024:
-            raise SizeExceededError(f"附件 {content_length // 1024 // 1024}MB 超过 {max_size_mb}MB 限制")
+            raise SizeExceededError(f"附件 {content_length // 1024 // 1024}MB 超过最大允许 {max_size_mb}MB 限制")
         # 获取文件名：优先用原始文件名，其次从 Content-Disposition 解析
         filename = ""
         if original_filename:
