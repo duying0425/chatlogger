@@ -1236,7 +1236,6 @@ INDEX_PAGE = r"""
                     </div>
                     <div class="chat-actions" onclick="event.stopPropagation()">
                         <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
-                        <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}')">删除</button>
                         <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                     </div>
                 </div>
