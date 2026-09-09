@@ -108,7 +108,7 @@ def update_user_name(user_id, name):
 def get_chats(user_id):
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM chats WHERE user_id = ? ORDER BY created_at", (user_id,)
+        "SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC, id DESC", (user_id,)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

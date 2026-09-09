@@ -1093,6 +1093,14 @@ INDEX_PAGE = r"""
         .cache-toggle-wrap input { cursor: pointer; margin: 0; }
         .checkbox-row { margin-top: 12px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4e5969; }
         .checkbox-row input { cursor: pointer; width: 15px; height: 15px; }
+        /* 列表头部与搜索框 */
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
+        .section-title { font-size: 16px; font-weight: 600; color: #1f2329; }
+        .chat-count { font-size: 13px; color: #8f959e; font-weight: normal; margin-left: 6px; }
+        .search-box { position: relative; }
+        .search-box input { padding: 7px 14px 7px 32px; border: 1px solid #dee0e3; border-radius: 8px; font-size: 13px; outline: none; width: 220px; transition: all 0.2s; background: white; }
+        .search-box input:focus { border-color: #3370ff; box-shadow: 0 0 0 2px rgba(51,112,255,0.15); width: 250px; }
+        .search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); font-size: 13px; color: #8f959e; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -1119,7 +1127,18 @@ INDEX_PAGE = r"""
                 </label>
             </div>
         </div>
-        <div class="section-title">已配置群聊</div>
+        <div class="section-header">
+            <div class="section-title">
+                已配置群聊
+                {% if chats %}<span class="chat-count">({{ chats|length }})</span>{% endif %}
+            </div>
+            {% if chats %}
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="chatSearchInput" placeholder="搜索群聊名称或 ID..." oninput="filterChats()" />
+            </div>
+            {% endif %}
+        </div>
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
@@ -1196,6 +1215,36 @@ INDEX_PAGE = r"""
         function openCacheView(chatId, e) {
             if (e) e.stopPropagation();
             window.location.href = '/cache/' + chatId + '/view';
+        }
+
+        function filterChats() {
+            const input = document.getElementById('chatSearchInput');
+            const query = (input ? input.value : '').trim().toLowerCase();
+            const items = document.querySelectorAll('#chatList .chat-item');
+            let visibleCount = 0;
+            items.forEach(item => {
+                const name = item.querySelector('.name')?.textContent.toLowerCase() || '';
+                const id = item.getAttribute('data-chat-id')?.toLowerCase() || '';
+                if (!query || name.includes(query) || id.includes(query)) {
+                    item.style.display = '';
+                    visibleCount++;
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+            let emptyTip = document.getElementById('searchNoResult');
+            if (visibleCount === 0 && items.length > 0) {
+                if (!emptyTip) {
+                    emptyTip = document.createElement('div');
+                    emptyTip.id = 'searchNoResult';
+                    emptyTip.className = 'empty';
+                    emptyTip.textContent = '未搜索到匹配的群聊';
+                    document.getElementById('chatList').appendChild(emptyTip);
+                }
+                emptyTip.style.display = 'block';
+            } else if (emptyTip) {
+                emptyTip.style.display = 'none';
+            }
         }
 
         async function toggleLocalCache(chatId, enabled) {

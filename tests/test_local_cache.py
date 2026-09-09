@@ -49,6 +49,20 @@ class LocalCacheTestSuite(unittest.TestCase):
         chat = models.get_chat(self.user["id"], self.chat_id)
         self.assertEqual(chat["local_cache"], 1)
 
+        # 测试排序：新添加的群排在最前面
+        chat_id_2 = "oc_test_chat_002"
+        models.add_chat(self.user["id"], chat_id_2, "第二个测试群")
+        chats = models.get_chats(self.user["id"])
+        self.assertEqual(chats[0]["chat_id"], chat_id_2)
+
+        # 当第一个群更新时间最新时，自动浮动到最前面 (updated_at DESC)
+        conn = models.get_db()
+        conn.execute("UPDATE chats SET updated_at = '2099-01-01 00:00:00' WHERE chat_id = ?", (self.chat_id,))
+        conn.commit()
+        conn.close()
+        chats = models.get_chats(self.user["id"])
+        self.assertEqual(chats[0]["chat_id"], self.chat_id)
+
     def test_02_sanitize_filename(self):
         """测试非法文件名清理（兼容 Windows/Linux）"""
         self.assertEqual(local_cache.sanitize_filename("test/file:name*?.txt"), "test_file_name_.txt")
