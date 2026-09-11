@@ -199,6 +199,32 @@ def api_chat_stats(chat_id):
         "pending": pending,
     })
 
+@app.route("/api/chats/fetch_name", methods=["GET"])
+def api_fetch_chat_name():
+    """根据群聊 ID 预拉取群名称（只读，不入库）"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    chat_id = request.args.get("chat_id", "").strip()
+    if not chat_id:
+        return jsonify({"error": "请输入群聊 ID"}), 400
+
+    client = get_feishu_client()
+    if not client:
+        return jsonify({"error": "飞书未授权或登录已失效"}), 401
+
+    try:
+        chat_info = client.get_chat_info(chat_id)
+        name = (chat_info.get("name") or "").strip()
+        return jsonify({"ok": True, "chat_name": name})
+    except Exception as e:
+        err_str = str(e)
+        warning = "自动获取群名失败"
+        if "232025" in err_str:
+            warning = "应用未开通机器人能力，无法自动获取群名"
+        return jsonify({"ok": False, "error": err_str, "warning": warning}), 200
+
 @app.route("/api/chats", methods=["POST"])
 def api_add_chat():
     user = get_current_user()
@@ -1290,6 +1316,15 @@ INDEX_PAGE = r"""
         .search-box input { padding: 7px 14px 7px 32px; border: 1px solid #dee0e3; border-radius: 8px; font-size: 13px; outline: none; width: 220px; transition: all 0.2s; background: white; }
         .search-box input:focus { border-color: #3370ff; box-shadow: 0 0 0 2px rgba(51,112,255,0.15); width: 250px; }
         .search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); font-size: 13px; color: #8f959e; pointer-events: none; }
+        /* 预获取群名称提示与动画 */
+        .name-input-wrapper { position: relative; flex: 1; min-width: 160px; display: flex; align-items: center; }
+        .name-input-wrapper input { width: 100%; padding-right: 32px; }
+        .input-spinner { position: absolute; right: 12px; width: 14px; height: 14px; border: 2px solid #dee0e3; border-top-color: #3370ff; border-radius: 50%; animation: spin 0.8s linear infinite; pointer-events: none; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .name-fetch-tip { font-size: 12px; margin-top: 6px; padding-left: 2px; line-height: 1.4; }
+        .name-fetch-tip.info { color: #00b42a; }
+        .name-fetch-tip.warn { color: #ff7d00; }
+        .name-fetch-tip.custom { color: #86909c; }
     </style>
 </head>
 <body>
@@ -1307,8 +1342,13 @@ INDEX_PAGE = r"""
             <div class="input-row">
                 <input type="text" id="chatIdInput" placeholder="输入群聊 ID (oc_xxx)" />
                 <input type="text" id="chatNameInput" placeholder="群聊名称（可选，留空自动获取）" style="flex:1; min-width:160px;" />
+                <div class="name-input-wrapper">
+                    <input type="text" id="chatNameInput" placeholder="群聊名称（可选，留空自动获取）" />
+                    <span id="nameFetchSpinner" class="input-spinner" style="display:none;"></span>
+                </div>
                 <button onclick="addChat()">添加</button>
             </div>
+            <div id="nameFetchTip" class="name-fetch-tip" style="display:none;"></div>
             <div class="checkbox-row">
                 <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
                     <input type="checkbox" id="localCacheCheckbox" checked>
@@ -1762,6 +1802,162 @@ INDEX_PAGE = r"""
         document.getElementById('chatIdInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') addChat();
         });
+        // ===== 群名称自动获取与防覆写逻辑 =====
+        let userHasCustomizedName = false;
+        let lastAutoFilledName = '';
+        let lastFetchedChatId = '';
+        let fetchRequestId = 0;
+        let fetchDebounceTimer = null;
+
+        async function tryFetchChatName(force = false) {
+            const chatIdInput = document.getElementById('chatIdInput');
+            const chatNameInput = document.getElementById('chatNameInput');
+            const spinner = document.getElementById('nameFetchSpinner');
+            const tip = document.getElementById('nameFetchTip');
+            if (!chatIdInput || !chatNameInput) return;
+
+            const chatId = chatIdInput.value.trim();
+
+            if (!chatId) {
+                if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+                if (spinner) spinner.style.display = 'none';
+                if (tip) tip.style.display = 'none';
+                if (chatNameInput.value === lastAutoFilledName) {
+                    chatNameInput.value = '';
+                    lastAutoFilledName = '';
+                }
+                lastFetchedChatId = '';
+                return;
+            }
+
+            // 群 ID 小于 5 位不触发拉取
+            if (chatId.length < 5) return;
+
+            if (chatId === lastFetchedChatId && !force) return;
+            lastFetchedChatId = chatId;
+
+            const reqId = ++fetchRequestId;
+            if (spinner) spinner.style.display = 'inline-block';
+            if (tip) tip.style.display = 'none';
+
+            try {
+                const resp = await fetch('/api/chats/fetch_name?chat_id=' + encodeURIComponent(chatId));
+                const data = await resp.json();
+
+                // 异步请求校验：丢弃过期请求与已被修改的输入
+                if (reqId !== fetchRequestId) return;
+                if (chatIdInput.value.trim() !== chatId) return;
+
+                if (spinner) spinner.style.display = 'none';
+
+                if (data.ok && data.chat_name) {
+                    const fetchedName = data.chat_name;
+                    const isFocusingName = (document.activeElement === chatNameInput);
+
+                    // 允许自动填入的条件：
+                    // 1. 用户从未手动输入群名；
+                    // 2. 或者当前输入框内容为空；
+                    // 3. 或者当前输入框的内容正好是上一次自动填入的值（未被改动）。
+                    const currentVal = chatNameInput.value.trim();
+                    const shouldAutoFill = !userHasCustomizedName || currentVal === '' || currentVal === lastAutoFilledName;
+
+                    if (shouldAutoFill && !isFocusingName) {
+                        chatNameInput.value = fetchedName;
+                        lastAutoFilledName = fetchedName;
+                        if (tip) {
+                            tip.className = 'name-fetch-tip info';
+                            tip.textContent = '✓ 已自动识别群名：' + fetchedName;
+                            tip.style.display = 'block';
+                        }
+                    } else if (isFocusingName && shouldAutoFill) {
+                        // 用户正在群名框编辑，不强行覆写输入框，显示提示并在 blur 时视情况填入
+                        if (tip) {
+                            tip.className = 'name-fetch-tip info';
+                            tip.textContent = '已识别群名：“' + fetchedName + '”（离开焦点生效）';
+                            tip.style.display = 'block';
+                        }
+                        const onBlurFill = function() {
+                            if (!userHasCustomizedName || chatNameInput.value.trim() === '' || chatNameInput.value.trim() === lastAutoFilledName) {
+                                chatNameInput.value = fetchedName;
+                                lastAutoFilledName = fetchedName;
+                                if (tip) {
+                                    tip.className = 'name-fetch-tip info';
+                                    tip.textContent = '✓ 已自动识别群名：' + fetchedName;
+                                }
+                            }
+                            chatNameInput.removeEventListener('blur', onBlurFill);
+                        };
+                        chatNameInput.addEventListener('blur', onBlurFill);
+                    } else {
+                        // 用户已经输入了自定义名称，绝对不覆盖！
+                        if (tip) {
+                            tip.className = 'name-fetch-tip custom';
+                            tip.textContent = '已识别飞书群名：“' + fetchedName + '”（保留您的自定义名称）';
+                            tip.style.display = 'block';
+                        }
+                    }
+                } else if (data.ok && !data.chat_name) {
+                    if (tip) {
+                        tip.className = 'name-fetch-tip warn';
+                        tip.textContent = '⚠️ 未能获取到群名称（群可能未命名），可手动输入';
+                        tip.style.display = 'block';
+                    }
+                } else {
+                    if (tip) {
+                        tip.className = 'name-fetch-tip warn';
+                        tip.textContent = '⚠️ ' + (data.warning || data.error || '获取群名失败，可手动填写');
+                        tip.style.display = 'block';
+                    }
+                }
+            } catch (err) {
+                if (reqId !== fetchRequestId) return;
+                if (spinner) spinner.style.display = 'none';
+                if (tip) {
+                    tip.className = 'name-fetch-tip warn';
+                    tip.textContent = '⚠️ 获取群名网络异常，可手动输入';
+                    tip.style.display = 'block';
+                }
+            }
+        }
+
+        const chatIdEl = document.getElementById('chatIdInput');
+        const chatNameEl = document.getElementById('chatNameInput');
+
+        if (chatIdEl) {
+            chatIdEl.addEventListener('input', function() {
+                if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+                fetchDebounceTimer = setTimeout(() => tryFetchChatName(), 600);
+            });
+            chatIdEl.addEventListener('blur', function() {
+                if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+                tryFetchChatName();
+            });
+            chatIdEl.addEventListener('paste', function() {
+                setTimeout(() => {
+                    if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+                    tryFetchChatName();
+                }, 50);
+            });
+            chatIdEl.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') addChat();
+            });
+        }
+
+        if (chatNameEl) {
+            chatNameEl.addEventListener('input', function() {
+                const val = chatNameEl.value.trim();
+                if (val && val !== lastAutoFilledName) {
+                    userHasCustomizedName = true;
+                    const tip = document.getElementById('nameFetchTip');
+                    if (tip && tip.classList.contains('info')) tip.style.display = 'none';
+                } else if (!val) {
+                    userHasCustomizedName = false;
+                }
+            });
+            chatNameEl.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') addChat();
+            });
+        }
     </script>
 </body>
 </html>
