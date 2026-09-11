@@ -15,51 +15,41 @@
 - **一键打包下载**：支持一键打包下载包含 Markdown 和全部附件的 ZIP 压缩包
 - chat_id 与多维表格/本地缓存映射关系持久化存储
 
-## 前置条件：创建飞书自建应用
+## 前置条件：接入 pm-assist 认证跳板
 
-### 1. 创建应用
+> OAuth 认证由 pm-assist（`https://pm.tmhcorps.cn/hub`）代理完成：本应用不再创建飞书自建应用、不持有 App Secret。用户在授权页看到的是 pm-assist 应用，token 也由其换发；拿到 token 后业务 API 依旧直连飞书。
 
-前往 [飞书开放平台](https://open.feishu.cn/) → 创建企业自建应用
+### 1. 在 pm-assist 注册本应用
 
-### 2. 开启机器人能力
+编辑服务器上 pm-assist 的 `.env`，在 `HUB_CLIENTS` 中加入一项（scope 按需增减）：
 
-应用详情 → 应用能力 → 添加机器人能力
-
-### 3. 配置权限
-
-应用详情 → 权限管理，申请以下权限：
-
-| 权限 | 用途 |
-|------|------|
-| `im:message:readonly` | 读取群聊消息 |
-| `im:message.group_msg:get_as_user` | 以用户身份获取群组消息 |
-| `bitable:app` | 创建/编辑多维表格 |
-| `docx:document:readonly` | 读取云文档内容（云文档快照缓存） |
-| `wiki:wiki:readonly` | 解析知识库链接（云文档快照缓存） |
-| `drive:drive:readonly` | 下载云文档内图片（云文档快照缓存） |
-| `offline_access` | 获取 refresh_token |
-
-> 注：新增 docx / wiki / drive 权限后，**已授权用户需退出并重新登录授权**，user_access_token 才具备新权限，否则云文档快照会因无权限跳过。
-
-### 4. 配置重定向 URL
-
-应用详情 → 开发配置 → 安全设置 → 重定向 URL
-
-```
-https://chatlogger.tmhcorps.cn/auth/callback
+```json
+{"id":"chatlogger","secret":"<随机密钥>","redirect_uri":"https://chatlogger.tmhcorps.cn/auth/callback","scopes":"im:message:readonly im:message.group_msg:get_as_user bitable:app im:chat:readonly offline_access docx:document:readonly wiki:wiki:readonly drive:drive:readonly"}
 ```
 
-### 5. 开启 Token 刷新
+然后 `systemctl --user restart pm-hub`。
 
-安全设置 → 打开「刷新 user_access_token」开关
+### 2. 配置本应用的 .env
 
-### 6. 发布应用
+```
+HUB_URL=https://pm.tmhcorps.cn
+HUB_CLIENT_ID=chatlogger
+HUB_CLIENT_SECRET=<与注册一致的随机密钥>
+```
 
-版本管理 → 创建版本 → 申请发布 → 管理员审批通过
-
-### 7. 获取凭证
-
-凭证和基础信息 → 记录 App ID 和 App Secret
+> 注：`id` / `redirect_uri` / `scopes` 以 pm-assist 注册信息为准；新增 docx / wiki / drive 等 scope 后，**已授权用户需退出并重新登录授权**，user_access_token 才具备新权限，否则云文档快照会因无权限跳过。
+>
+> 注：pm-assist 应用需已开通下表权限并开启「刷新 user_access_token」（一次性配置）：
+>
+> | 权限 | 用途 |
+> |------|------|
+> | `im:message:readonly` | 读取群聊消息 |
+> | `im:message.group_msg:get_as_user` | 以用户身份获取群组消息 |
+> | `bitable:app` | 创建/编辑多维表格 |
+> | `docx:document:readonly` | 读取云文档内容（云文档快照缓存） |
+> | `wiki:wiki:readonly` | 解析知识库链接（云文档快照缓存） |
+> | `drive:drive:readonly` | 下载云文档内图片（云文档快照缓存） |
+> | `offline_access` | 获取 refresh_token |
 
 ## 部署与运行
 
@@ -70,7 +60,7 @@ https://chatlogger.tmhcorps.cn/auth/callback
 ```bash
 # 1. 复制环境变量模板
 cp .env.example .env
-# 编辑 .env 填写 FEISHU_APP_ID, FEISHU_APP_SECRET 等核心配置
+# 编辑 .env 填写 HUB_CLIENT_ID, HUB_CLIENT_SECRET 等核心配置
 
 # 2. 创建持久化数据目录
 mkdir -p data cache
@@ -136,9 +126,9 @@ server {
 
 | 变量名 | 默认值 | 说明 |
 |---|---|---|
-| `FEISHU_APP_ID` | 无 (必填) | 飞书开放平台自建应用的 App ID |
-| `FEISHU_APP_SECRET` | 无 (必填) | 飞书开放平台自建应用的 App Secret |
-| `REDIRECT_URI` | `http://localhost:5000/auth/callback` | OAuth 回调地址，需与飞书后台安全设置一致 |
+| `HUB_URL` | `https://pm.tmhcorps.cn` | 认证跳板地址（pm-assist） |
+| `HUB_CLIENT_ID` | 无 (必填) | 跳板注册的 client_id（见 pm-assist `.env` 的 HUB_CLIENTS） |
+| `HUB_CLIENT_SECRET` | 无 (必填) | 跳板注册的 client_secret，需与 pm-assist 一致 |
 | `SECRET_KEY` | `change-this-to-a-random-secret-key` | Flask Session 加密密钥（建议生成长随机字符） |
 | `DB_PATH` | `./chatlogger.db`（容器内推荐 `/app/data/chatlogger.db`） | SQLite 数据库文件存储路径 |
 | `LOCAL_CACHE_DIR` | `./cache`（容器内推荐 `/app/cache`） | 本地 Markdown 归档与附件缓存存储目录 |
@@ -215,13 +205,13 @@ mv chatlogger.db data/
             └── docs/（云文档快照）
 ```
 
-### 步骤 4：调整 `.env` 与飞书开放平台回调地址
+### 步骤 4：调整 `.env` 与认证跳板回调地址
 
 1. **若保留原域名**（推荐）：
-   通过 NAS 的反向代理、Cloudflare Tunnel 或 DDNS 将 `chatlogger.tmhcorps.cn` 指向 NAS 的 `5000` 端口，则 `.env` 中的 `REDIRECT_URI` 与飞书后台完全无需修改！
+   通过 NAS 的反向代理、Cloudflare Tunnel 或 DDNS 将 `chatlogger.tmhcorps.cn` 指向 NAS 的 `5000` 端口，则 `.env` 与 pm-assist 注册信息完全无需修改！
 2. **若更换新域名/IP**：
-   - 修改 NAS 上的 `.env`：`REDIRECT_URI=https://<新域名或IP:端口>/auth/callback`；
-   - 登录 [飞书开放平台](https://open.feishu.cn/) → 应用详情 → 开发配置 → 安全设置 → 重定向 URL，增加该新回调地址。
+   - 修改 NAS 上的 `.env`（如有相关配置）；
+   - 登录服务器修改 pm-assist `.env` 中 `HUB_CLIENTS` 的 `redirect_uri` 为 `https://<新域名或IP:端口>/auth/callback`，然后 `systemctl --user restart pm-hub`。飞书开放平台无需任何改动。
 
 ### 步骤 5：启动 NAS 容器
 

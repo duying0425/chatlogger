@@ -110,18 +110,18 @@ def index():
 
 @app.route("/auth/callback")
 def auth_callback():
-    code = request.args.get("code")
+    auth_code = request.args.get("auth_code")
     error = request.args.get("error")
 
     if error:
         return f"授权失败: {error}", 400
 
-    if not code:
+    if not auth_code:
         return "缺少授权码", 400
 
-    # 用 code 换取 token
-    token_data = FeishuClient.exchange_code_for_token(code)
-    if token_data.get("code") != 0:
+    # 用跳板下发的一次性 auth_code 换取 token
+    token_data = FeishuClient.exchange_code_for_token(auth_code)
+    if "access_token" not in token_data:
         return f"获取 token 失败: {json.dumps(token_data, ensure_ascii=False)}", 500
 
     access_token = token_data["access_token"]
@@ -129,13 +129,17 @@ def auth_callback():
     expires_in = token_data["expires_in"]
     refresh_expires_in = token_data["refresh_token_expires_in"]
 
-    # 获取用户信息
-    user_info = FeishuClient.get_user_info(access_token)
-    if user_info.get("code") != 0:
-        return f"获取用户信息失败: {json.dumps(user_info, ensure_ascii=False)}", 500
-
-    open_id = user_info["data"]["open_id"]
-    name = user_info["data"].get("name", open_id)
+    # 用户信息由跳板在回调时一并获取返回；缺失时直连飞书兜底
+    open_id = token_data.get("open_id", "")
+    name = token_data.get("name", "")
+    if not open_id:
+        user_info = FeishuClient.get_user_info(access_token)
+        if user_info.get("code") != 0:
+            return f"获取用户信息失败: {json.dumps(user_info, ensure_ascii=False)}", 500
+        open_id = user_info["data"]["open_id"]
+        name = user_info["data"].get("name", open_id)
+    elif not name:
+        name = open_id
 
     # 存入数据库
     user = models.get_or_create_user(open_id, name)

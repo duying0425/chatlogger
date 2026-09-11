@@ -89,8 +89,8 @@ class FeishuClient:
         self._refresh_access_token()
 
     def _refresh_access_token(self):
-        """刷新 user_access_token。
-        飞书 refresh_token 一次性，并发刷新会互相覆盖导致 20073 错误，
+        """经认证跳板刷新 user_access_token。
+        refresh_token 一次性，并发刷新会互相覆盖导致 20073 错误，
         用全局锁串行化。同一进程内多个线程同时触发刷新时，
         第一个完成后，后续线程检测 token 已更新就跳过。"""
         # 双重检查：拿到锁之前可能已有线程刷新成功
@@ -100,14 +100,15 @@ class FeishuClient:
             # 再次检查：拿到锁后可能已被其他线程刷新
             if time.time() < self.token_expires_at - 300:
                 return
-            resp = requests.post(Config.TOKEN_URL, json={
-                "grant_type": "refresh_token",
-                "client_id": Config.FEISHU_APP_ID,
-                "client_secret": Config.FEISHU_APP_SECRET,
+            resp = requests.post(f"{Config.HUB_URL}/hub/api/refresh", json={
+                "client_id": Config.HUB_CLIENT_ID,
+                "client_secret": Config.HUB_CLIENT_SECRET,
                 "refresh_token": self.refresh_token,
-            })
+            }, timeout=15)
             data = resp.json()
-            if data.get("code") != 0:
+            if resp.status_code != 200 or "access_token" not in data:
+                # 错误体形如 {"detail":{"code":20073,"msg":"..."}}，
+                # 保留 code 字符串使上层 "20073" 检测仍可触发重新登录提示
                 raise Exception(f"刷新 token 失败: {data}")
 
             self.access_token = data["access_token"]
@@ -143,26 +144,22 @@ class FeishuClient:
 
     @staticmethod
     def get_authorize_url(state=""):
-        """构造 OAuth 授权链接"""
-        from urllib.parse import urlencode, quote
+        """构造认证跳板授权链接（scope 由 hub 按注册信息下发）"""
+        from urllib.parse import urlencode
         params = {
-            "client_id": Config.FEISHU_APP_ID,
-            "redirect_uri": Config.REDIRECT_URI,
+            "client_id": Config.HUB_CLIENT_ID,
             "state": state,
-            "scope": Config.OAUTH_SCOPES,
         }
-        return f"{Config.AUTHORIZE_URL}?{urlencode(params)}"
+        return f"{Config.HUB_URL}/hub/authorize?{urlencode(params)}"
 
     @staticmethod
-    def exchange_code_for_token(code):
-        """用授权码换取 user_access_token"""
-        resp = requests.post(Config.TOKEN_URL, json={
-            "grant_type": "authorization_code",
-            "client_id": Config.FEISHU_APP_ID,
-            "client_secret": Config.FEISHU_APP_SECRET,
-            "code": code,
-            "redirect_uri": Config.REDIRECT_URI,
-        })
+    def exchange_code_for_token(auth_code):
+        """用跳板下发的一次性 auth_code 换取 user_access_token"""
+        resp = requests.post(f"{Config.HUB_URL}/hub/api/token", json={
+            "client_id": Config.HUB_CLIENT_ID,
+            "client_secret": Config.HUB_CLIENT_SECRET,
+            "auth_code": auth_code,
+        }, timeout=15)
         return resp.json()
 
     @staticmethod

@@ -1,30 +1,15 @@
 import os
 
 class Config:
-    # ===== 飞书应用配置 =====
-    # 在飞书开发者后台创建自建应用后，从「凭证和基础信息」获取
-    FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
-    FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
+    # ===== 认证跳板配置 =====
+    # OAuth 由 pm-assist 认证跳板（https://pm.tmhcorps.cn/hub）代理完成，
+    # 不再直接持有飞书应用凭证；client_id/secret 在 pm-assist .env 的 HUB_CLIENTS 注册
+    HUB_URL = os.environ.get("HUB_URL", "https://pm.tmhcorps.cn")
+    HUB_CLIENT_ID = os.environ.get("HUB_CLIENT_ID", "")
+    HUB_CLIENT_SECRET = os.environ.get("HUB_CLIENT_SECRET", "")
 
-    # OAuth 重定向地址，部署时改为实际域名
-    # 本地开发: http://localhost:5000/auth/callback
-    # 生产环境: https://chatlogger.tmhcorps.cn/auth/callback
-    REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:5000/auth/callback")
-
-    # OAuth 授权页地址
-    AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
-    # Token 端点
-    TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
-    # 飞书 OpenAPI 基础地址
+    # 飞书 OpenAPI 基础地址（拿到的 user_access_token 依旧直连调用）
     API_BASE = "https://open.feishu.cn/open-apis"
-
-    # 需要申请的 OAuth scope（空格分隔）
-    # 注：im:chat.members:read 已不需要（改用人员字段，飞书自动解析 open_id）
-    # 注：im:chat:readonly 用于获取群名，失败时用 chat_id 兜底
-    # 注：docx/wiki/drive 用于缓存消息中分享的飞书云文档（需重新授权生效）
-    OAUTH_SCOPES = ("im:message:readonly im:message.group_msg:get_as_user bitable:app "
-                    "im:chat:readonly offline_access "
-                    "docx:document:readonly wiki:wiki:readonly drive:drive:readonly")
 
     # ===== 应用配置 =====
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-this-to-a-random-secret-key")
