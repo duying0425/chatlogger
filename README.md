@@ -24,7 +24,7 @@
 编辑服务器上 pm-assist 的 `.env`，在 `HUB_CLIENTS` 中加入一项（scope 按需增减）：
 
 ```json
-{"id":"chatlogger","secret":"<随机密钥>","redirect_uri":"https://chatlogger.tmhcorps.cn/auth/callback","scopes":"im:message:readonly im:message.group_msg:get_as_user bitable:app im:chat:readonly offline_access docx:document:readonly wiki:wiki:readonly drive:drive:readonly"}
+{"id":"chatlogger","secret":"<随机密钥>","redirect_uri":"https://chatlogger.tmhcorps.cn/auth/callback","scopes":"im:message:readonly im:message.group_msg:get_as_user bitable:app im:chat:readonly offline_access docx:document:readonly wiki:wiki:readonly docs:document.media:download"}
 ```
 
 然后 `systemctl --user restart pm-hub`。
@@ -37,7 +37,7 @@ HUB_CLIENT_ID=chatlogger
 HUB_CLIENT_SECRET=<与注册一致的随机密钥>
 ```
 
-> 注：`id` / `redirect_uri` / `scopes` 以 pm-assist 注册信息为准；新增 docx / wiki / drive 等 scope 后，**已授权用户需退出并重新登录授权**，user_access_token 才具备新权限，否则云文档快照会因无权限跳过。
+> 注：`id` / `redirect_uri` / `scopes` 以 pm-assist 注册信息为准；新增 docx / wiki / 媒体下载等 scope 后，**已授权用户需退出并重新登录授权**，user_access_token 才具备新权限，否则云文档快照会因无权限跳过。
 >
 > 注：pm-assist 应用需已开通下表权限并开启「刷新 user_access_token」（一次性配置）：
 >
@@ -48,7 +48,7 @@ HUB_CLIENT_SECRET=<与注册一致的随机密钥>
 > | `bitable:app` | 创建/编辑多维表格 |
 > | `docx:document:readonly` | 读取云文档内容（云文档快照缓存） |
 > | `wiki:wiki:readonly` | 解析知识库链接（云文档快照缓存） |
-> | `drive:drive:readonly` | 下载云文档内图片（云文档快照缓存） |
+> | `docs:document.media:download` | 下载云文档内图片（云文档快照缓存） |
 > | `offline_access` | 获取 refresh_token |
 
 ## 部署与运行
@@ -230,7 +230,7 @@ docker compose up -d
 3. **数据同步**：
    - 点击「同步」按钮执行增量归档；
    - 同步完成后可直达飞书多维表格，或点击群卡片进入 Markdown 在线预览页面（支持图片灯箱预览与附件直接下载）；
-   - 开启本地缓存时，消息中的飞书云文档链接会自动生成 Markdown 快照（需 docx / wiki / drive 权限）。
+   - 开启本地缓存时，消息中的飞书云文档链接会自动生成 Markdown 快照（需 docx / wiki / 媒体下载权限）。
 
 ## 数据存储
 
@@ -246,7 +246,7 @@ docker compose up -d
 - 首次同步某个群时会自动创建多维表格，后续同步为增量追加
 - 附件（图片/文件）会自动下载并上传到对应记录
 - 大文件（>100MB）可能下载超时
-- 云文档快照依赖 docx / wiki / drive 权限；在飞书后台新增权限后，已登录用户需重新授权才能生效
+- 云文档快照依赖 docx / wiki / 媒体下载权限；在飞书后台新增权限后，已登录用户需重新授权才能生效
 
 ## 运行测试
 
