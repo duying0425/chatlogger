@@ -52,6 +52,15 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # 迁移：飞书真实群名（与用户自定义名 chat_name 分开存储）
+    try:
+        c.execute("ALTER TABLE chats ADD COLUMN feishu_name TEXT")
+        # 列刚创建：存量行的 chat_name 多为自动拉取的真实群名，回填以立即展示
+        c.execute("UPDATE chats SET feishu_name = chat_name "
+                  "WHERE chat_name IS NOT NULL AND chat_name != chat_id")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -121,16 +130,28 @@ def get_chat(user_id, chat_id):
     conn.close()
     return dict(row) if row else None
 
-def add_chat(user_id, chat_id, chat_name=None, local_cache=0):
+def add_chat(user_id, chat_id, chat_name=None, local_cache=0, feishu_name=None):
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO chats (user_id, chat_id, chat_name, local_cache) VALUES (?, ?, ?, ?)",
-            (user_id, chat_id, chat_name, 1 if local_cache else 0)
+            "INSERT INTO chats (user_id, chat_id, chat_name, local_cache, feishu_name) VALUES (?, ?, ?, ?, ?)",
+            (user_id, chat_id, chat_name, 1 if local_cache else 0, feishu_name)
         )
         conn.commit()
     except sqlite3.IntegrityError:
         pass  # 已存在则忽略
+    conn.close()
+
+def update_chat_feishu_name(user_id, chat_id, feishu_name):
+    """刷新飞书真实群名（不触碰 chat_name / updated_at，避免影响列表排序）"""
+    if not feishu_name:
+        return
+    conn = get_db()
+    conn.execute(
+        "UPDATE chats SET feishu_name = ? WHERE user_id = ? AND chat_id = ?",
+        (feishu_name, user_id, chat_id)
+    )
+    conn.commit()
     conn.close()
 
 def update_chat_local_cache(user_id, chat_id, local_cache):

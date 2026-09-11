@@ -248,23 +248,23 @@ def api_add_chat():
     if existing:
         return jsonify({"error": "该群聊已存在"}), 409
 
-    # 名称优先级：用户填写 > API 拉取 > chat_id
-    chat_name = custom_name
+    # 无论是否自定义名称，都尝试拉取一次真实群名（用于列表第二行展示）
+    feishu_name = ""
     name_fetch_error = ""
-    if not chat_name:
-        client = get_feishu_client()
-        if client:
-            try:
-                chat_info = client.get_chat_info(chat_id)
-                chat_name = chat_info.get("name", "") or ""
-            except Exception as e:
-                chat_name = ""
-                name_fetch_error = str(e)
-                print(f"[add_chat] 自动获取群名失败 chat_id={chat_id}: {e}")
-    if not chat_name:
-        chat_name = chat_id
+    client = get_feishu_client()
+    if client:
+        try:
+            chat_info = client.get_chat_info(chat_id)
+            feishu_name = (chat_info.get("name") or "").strip()
+        except Exception as e:
+            name_fetch_error = str(e)
+            print(f"[add_chat] 自动获取群名失败 chat_id={chat_id}: {e}")
 
-    models.add_chat(user["id"], chat_id, chat_name, local_cache=1 if local_cache_opt else 0)
+    # 显示名优先级：用户填写 > 真实群名 > chat_id
+    chat_name = custom_name or feishu_name or chat_id
+
+    models.add_chat(user["id"], chat_id, chat_name, local_cache=1 if local_cache_opt else 0,
+                    feishu_name=feishu_name or None)
     result = {"ok": True, "chat_name": chat_name, "local_cache": bool(local_cache_opt)}
     if name_fetch_error:
         # 获取失败原因可见，不再静默退化为 chat_id
@@ -597,17 +597,18 @@ def _run_sync(user_id, chat_id):
 
         is_local_cache_enabled = bool(chat_config.get("local_cache", 0))
 
-        # 1. 获取群名称：仅在尚未设置（或退化为 chat_id）时尝试拉取，避免覆盖用户自定义名称
+        # 1. 获取群信息：刷新真实群名（群名可能已变）；chat_name 仅在缺失时补齐，避免覆盖自定义名称
         _set_progress(chat_id, stage="fetching_chat_info", message="获取群信息...")
         chat_name = chat_config.get("chat_name") or ""
-        if not chat_name or chat_name == chat_id:
-            try:
-                chat_info = client.get_chat_info(chat_id)
-                fetched = chat_info.get("name", "") or ""
-                if fetched:
+        try:
+            chat_info = client.get_chat_info(chat_id)
+            fetched = (chat_info.get("name") or "").strip()
+            if fetched:
+                models.update_chat_feishu_name(user["id"], chat_id, fetched)
+                if not chat_name or chat_name == chat_id:
                     chat_name = fetched
-            except Exception as e:
-                print(f"[sync] 自动获取群名失败 chat_id={chat_id}: {e}")
+        except Exception as e:
+            print(f"[sync] 自动获取群名失败 chat_id={chat_id}: {e}")
         if not chat_name:
             chat_name = chat_id
 
@@ -1242,6 +1243,7 @@ INDEX_PAGE = r"""
         .chat-info .name { font-size: 15px; font-weight: 600; color: #1f2329; margin-bottom: 6px; }
         .chat-info .meta { font-size: 12px; color: #86909c; margin-bottom: 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
         .chat-info .meta .id { font-family: 'SF Mono', Consolas, monospace; background: #f2f3f5; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+        .chat-info .meta .feishu-tag { background: #e8f3ff; color: #3370ff; padding: 2px 8px; border-radius: 4px; font-size: 11px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .chat-info .meta a { color: #3370ff; text-decoration: none; font-size: 12px; }
         .chat-info .meta a:hover { text-decoration: underline; }
         .chat-info .meta .dot { color: #c9cdd4; }
@@ -1341,9 +1343,8 @@ INDEX_PAGE = r"""
             <h2>添加群聊</h2>
             <div class="input-row">
                 <input type="text" id="chatIdInput" placeholder="输入群聊 ID (oc_xxx)" />
-                <input type="text" id="chatNameInput" placeholder="群聊名称（可选，留空自动获取）" style="flex:1; min-width:160px;" />
                 <div class="name-input-wrapper">
-                    <input type="text" id="chatNameInput" placeholder="群聊名称（可选，留空自动获取）" />
+                    <input type="text" id="chatNameInput" placeholder="自定义名称（可选，留空用真实群名）" />
                     <span id="nameFetchSpinner" class="input-spinner" style="display:none;"></span>
                 </div>
                 <button onclick="addChat()">添加</button>
@@ -1380,6 +1381,7 @@ INDEX_PAGE = r"""
                             {% endif %}
                         </div>
                         <div class="meta" id="meta-{{ chat.chat_id }}">
+                            {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}<span class="feishu-tag" title="飞书真实群名">{{ chat.feishu_name }}</span>{% endif %}
                             <span class="id">{{ chat.chat_id }}</span>
                             {% if chat.record_count %}<span class="dot">·</span><span>已同步 <span class="record-count">{{ chat.record_count }}</span> 条</span>{% endif %}
                             {% if chat.base_url %}<span class="dot">·</span><a href="{{ chat.base_url }}" target="_blank" onclick="event.stopPropagation()">查看表格</a>{% endif %}
@@ -1460,8 +1462,9 @@ INDEX_PAGE = r"""
             let visibleCount = 0;
             items.forEach(item => {
                 const name = item.querySelector('.name')?.textContent.toLowerCase() || '';
+                const feishu = item.querySelector('.feishu-tag')?.textContent.toLowerCase() || '';
                 const id = item.getAttribute('data-chat-id')?.toLowerCase() || '';
-                if (!query || name.includes(query) || id.includes(query)) {
+                if (!query || name.includes(query) || feishu.includes(query) || id.includes(query)) {
                     item.style.display = '';
                     visibleCount++;
                 } else {
