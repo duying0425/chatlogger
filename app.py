@@ -22,6 +22,7 @@ from feishu import (
     extract_resource_keys,
     SizeExceededError,
 )
+from feishu_doc import cache_docs_for_messages, extract_doc_links
 
 app = Flask(__name__)
 app.secret_key = Config.SECRET_KEY
@@ -456,6 +457,92 @@ def api_sync_status(chat_id):
     return jsonify(progress)
 
 
+@app.route("/api/debug/messages/<chat_id>", methods=["GET"])
+def api_debug_messages(chat_id):
+    """调试端点：按时间范围拉取飞书原始消息 JSON（未经任何加工），用于核对本地缓存是否忠实。
+
+    查询参数：
+      start_time / end_time: "YYYY-MM-DD HH:mm:ss"（北京时间，可只给一边）
+      limit: 最多返回条数（默认 50，防止响应过大）
+    """
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    client = get_feishu_client()
+    if not client:
+        return jsonify({"error": "Token 无效，请重新登录"}), 401
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return jsonify({"error": "群聊未配置"}), 404
+
+    def parse_ts(s, end=False):
+        """把 "YYYY-MM-DD HH:mm[:ss]" 转为毫秒时间戳；end=True 时秒缺省取 59"""
+        if not s:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                from datetime import datetime, timezone, timedelta
+                dt = datetime.strptime(s.strip(), fmt)
+                if end and fmt != "%Y-%m-%d %H:%M:%S":
+                    dt = dt.replace(hour=23, minute=59, second=59)
+                return int(dt.replace(tzinfo=timezone(timedelta(hours=8))).timestamp() * 1000)
+            except ValueError:
+                continue
+        return jsonify({"error": f"时间格式无效: {s}（应为 YYYY-MM-DD HH:mm:ss）"}), 400
+
+    try:
+        start_ts = parse_ts(request.args.get("start_time"))
+        end_ts = parse_ts(request.args.get("end_time"), end=True)
+        if isinstance(start_ts, tuple):
+            return start_ts
+        if isinstance(end_ts, tuple):
+            return end_ts
+    except Exception as e:
+        return jsonify({"error": f"时间参数解析失败: {e}"}), 400
+
+    try:
+        limit = max(1, min(int(request.args.get("limit", 50)), 200))
+    except ValueError:
+        limit = 50
+
+    # 拉取消息（复用现有分页逻辑，不做增量过滤）
+    try:
+        messages = client.list_all_messages(chat_id, start_position=0)
+    except Exception as e:
+        return jsonify({"error": f"拉取消息失败: {e}"}), 502
+
+    def in_range(m):
+        ts = int(m.get("create_time") or 0)
+        if start_ts and ts < start_ts:
+            return False
+        if end_ts and ts > end_ts:
+            return False
+        return True
+
+    filtered = [m for m in messages if in_range(m)]
+    filtered = filtered[:limit]
+
+    # 附上可读时间便于对照
+    result = []
+    for m in filtered:
+        result.append({
+            "create_time": m.get("create_time"),
+            "time_readable": timestamp_to_datetime(m.get("create_time")),
+            "sender": m.get("sender"),
+            "msg_type": m.get("msg_type"),
+            "message_id": m.get("message_id"),
+            "raw": m,
+        })
+
+    return jsonify({
+        "chat_id": chat_id,
+        "count": len(result),
+        "messages": result,
+    })
+
+
 def _run_sync(user_id, chat_id):
     """在后台线程中执行同步主流程，实时更新进度状态。"""
     # 在子线程中重新获取用户和 client（Flask session 在子线程不可用）
@@ -729,10 +816,35 @@ def _run_sync(user_id, chat_id):
                     print(f"[写入跳过说明失败] {e}")
 
         # 7.6 若开启本地缓存，格式化所有消息并追加写入 Markdown 文件
+        doc_map = {}
+        doc_fail_map = {}
         if is_local_cache_enabled:
             try:
                 _set_progress(chat_id, stage="saving_local_cache", current=0, total=total,
                               message="正在写入本地缓存 Markdown...")
+
+                # 7.65 云文档快照：扫描本轮消息中的飞书云文档链接并缓存内容
+                try:
+                    def _save_doc(doc_token, title, content):
+                        return local_cache.save_doc(chat_id, chat_name, doc_token, title, content)
+
+                    def _save_doc_image(image_token):
+                        content, ext = client.download_drive_media(image_token)
+                        return local_cache.save_doc_image(
+                            chat_id, chat_name, image_token, content, ext)
+
+                    doc_map, doc_failures = cache_docs_for_messages(
+                        client, messages, _save_doc, save_doc_image=_save_doc_image,
+                        on_progress=lambda d, t, msg: _set_progress(
+                            chat_id, stage="caching_docs", current=d, total=t, message=msg))
+                    doc_fail_map = {token: err for token, err in doc_failures}
+                except Exception as de:
+                    print(f"[doc_cache] 云文档缓存失败（不阻断同步）: {de}")
+
+                if doc_map or doc_fail_map:
+                    _set_progress(chat_id, stage="saving_local_cache", current=0, total=total,
+                                  message="正在写入本地缓存 Markdown...")
+
                 md_blocks = []
                 for i, m in enumerate(messages):
                     sid = m.get("sender", {}).get("id", "")
@@ -756,10 +868,19 @@ def _run_sync(user_id, chat_id):
                             m_assets[fk] = downloaded_assets[fk]
 
                     record_id = record_ids[i] if i < len(record_ids) else None
-                    m_skipped = skipped_notes.get(record_id) if record_id else None
+                    m_skipped = list(skipped_notes.get(record_id)) if record_id and skipped_notes.get(record_id) else None
+                    # 该消息中的云文档快照失败提示（无权限/类型不支持等）
+                    if doc_fail_map:
+                        for link in extract_doc_links(m):
+                            ferr = doc_fail_map.get(link.get("token"))
+                            if ferr:
+                                m_skipped = (m_skipped or []) + [f"[云文档快照失败: {ferr}]"]
+                    if m_skipped is not None and not m_skipped:
+                        m_skipped = None
 
                     block = local_cache.format_message_to_markdown(
-                        m, s_name, d_str, asset_map=m_assets, skipped_notes=m_skipped
+                        m, s_name, d_str, asset_map=m_assets, skipped_notes=m_skipped,
+                        doc_map=doc_map
                     )
                     md_blocks.append(block)
 
@@ -781,6 +902,7 @@ def _run_sync(user_id, chat_id):
             "new_count": len(messages),
             "attach_count": attach_count,
             "skipped_count": skipped_count,
+            "doc_count": len(doc_map),
             "total_records": new_record_count,
             "base_url": base_url,
             "local_cache": is_local_cache_enabled,
@@ -792,6 +914,7 @@ def _run_sync(user_id, chat_id):
                       message=f"同步完成：新增 {len(messages)} 条消息" +
                               (f"，附件 {attach_count} 个" if attach_count > 0 else "") +
                               (f"，跳过大附件 {skipped_count} 个" if skipped_count > 0 else "") +
+                              (f"，云文档快照 {len(doc_map)} 篇" if doc_map else "") +
                               cache_suffix,
                       result=result)
 
@@ -1417,6 +1540,8 @@ INDEX_PAGE = r"""
             writing_records: '写入多维表格',
             records_written: '记录写入完成',
             uploading_attachments: '上传附件',
+            saving_local_cache: '写入本地缓存',
+            caching_docs: '缓存云文档',
             done: '同步完成',
             error: '同步失败',
             idle: '空闲'

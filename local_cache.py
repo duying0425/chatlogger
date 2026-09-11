@@ -103,6 +103,74 @@ def save_asset(chat_id, chat_name, file_content, filename, file_key=""):
     return f"assets/{safe_name}"
 
 
+# ===== 云文档快照缓存 =====
+
+def get_doc_cache_dir(chat_id, chat_name=None):
+    """云文档快照目录：cache/{chat}/assets/docs/"""
+    docs_dir = os.path.join(get_chat_cache_dir(chat_id, chat_name), "assets", "docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    return docs_dir
+
+
+def find_cached_doc(chat_id, chat_name, doc_token):
+    """按 doc_token 查找已缓存的文档快照，返回相对路径（assets/docs/xxx.md）或 None。"""
+    docs_dir = get_doc_cache_dir(chat_id, chat_name)
+    suffix = f"_{doc_token}.md"
+    for f in os.listdir(docs_dir):
+        if f.endswith(suffix):
+            return f"assets/docs/{f}"
+    return None
+
+
+def save_doc(chat_id, chat_name, doc_token, title, md_content):
+    """保存云文档快照 Markdown。同一文档（doc_token）已缓存则直接复用（快照语义，不追更新）。"""
+    existing = find_cached_doc(chat_id, chat_name, doc_token)
+    if existing:
+        return existing
+    docs_dir = get_doc_cache_dir(chat_id, chat_name)
+    safe_title = sanitize_filename(title, fallback="doc")
+    fname = f"{safe_title}_{doc_token}.md"
+    with open(os.path.join(docs_dir, fname), "w", encoding="utf-8") as f:
+        f.write(md_content)
+    return f"assets/docs/{fname}"
+
+
+def save_doc_image(chat_id, chat_name, image_token, file_content, ext="png"):
+    """保存文档内图片到 assets/docs/。返回相对文档快照 md 的路径（同目录文件名）。"""
+    docs_dir = get_doc_cache_dir(chat_id, chat_name)
+    fname = f"img_{sanitize_filename(image_token, fallback='img')}.{ext}"
+    path = os.path.join(docs_dir, fname)
+    if not os.path.exists(path):  # 同 token 图片复用
+        with open(path, "wb") as f:
+            f.write(file_content)
+    return fname
+
+
+def annotate_doc_links(content_md, doc_map):
+    """在消息 Markdown 中的飞书云文档链接后附加本地快照链接。
+    doc_map: {token -> rel_path}，token 为消息 URL 中出现的 docx/wiki token。
+    两种形态分别处理：
+    - Markdown 链接 [文本](URL) → [文本](URL) [📄缓存](rel)
+    - 裸 URL → URL [📄缓存](rel)
+    """
+    if not doc_map or not content_md:
+        return content_md
+    for token, rel in doc_map.items():
+        et = re.escape(token)
+        # 1) Markdown 链接形式：整个 [x](URL) 之后追加
+        link_re = re.compile(
+            rf"\[([^\]]*)\]\((https?://[^\s)]*feishu\.cn/(?:docx|wiki|docs)/{et}[^\s)]*)\)",
+            re.IGNORECASE)
+        content_md = link_re.sub(lambda m: f"{m.group(0)} [📄缓存]({rel})", content_md)
+        # 2) 裸 URL（不在 ]( 内）：URL 后追加。查询参数遇空白/中文即止，防止吞掉后续文字
+        bare_re = re.compile(
+            rf"(?<!\]\()(https?://[A-Za-z0-9.-]*feishu\.cn/(?:docx|wiki|docs)/{et}"
+            rf"(?:\?[^\s\u4e00-\u9fff\uff0c\u3002\uff1b\uff1a\uff01\uff09]*)?)",
+            re.IGNORECASE)
+        content_md = bare_re.sub(lambda m: f"{m.group(1)} [📄缓存]({rel})", content_md)
+    return content_md
+
+
 def _format_post_content(locale_dict, asset_map=None):
     """格式化飞书富文本（post）为标准 Markdown 文本，并内嵌替换图片与多媒体相对路径。"""
     if not isinstance(locale_dict, dict):
@@ -176,13 +244,14 @@ def _format_post_content(locale_dict, asset_map=None):
     return "\n\n".join(lines).strip()
 
 
-def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skipped_notes=None):
+def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skipped_notes=None, doc_map=None):
     """将一条飞书消息对象格式化为标准 Markdown 消息块。
     msg: 飞书消息 dict
     speaker_name: 解析后的发言人姓名（如 "张三"、"系统"、"机器人"）
     date_str: 格式化时间字符串 "YYYY-MM-DD HH:mm:ss"
     asset_map: {file_key: rel_path} 映射表
     skipped_notes: 该条消息被跳过的附件提示（如超大文件）
+    doc_map: {doc_token: rel_path} 云文档快照映射，命中消息中的云文档链接时附加本地缓存链接
     """
     if asset_map is None:
         asset_map = {}
@@ -255,6 +324,10 @@ def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skip
     else:
         from feishu import process_message_content
         content_md = process_message_content(msg)
+
+    # 云文档快照链接标注（text / post 中的飞书云文档链接）
+    if doc_map:
+        content_md = annotate_doc_links(content_md, doc_map)
 
     # 检查是否有未在正文中渲染的关联资源（如普通消息的附件），追加到消息底部
     extra_assets = []

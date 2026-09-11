@@ -21,7 +21,10 @@ class Config:
     # 需要申请的 OAuth scope（空格分隔）
     # 注：im:chat.members:read 已不需要（改用人员字段，飞书自动解析 open_id）
     # 注：im:chat:readonly 用于获取群名，失败时用 chat_id 兜底
-    OAUTH_SCOPES = "im:message:readonly im:message.group_msg:get_as_user bitable:app im:chat:readonly offline_access"
+    # 注：docx/wiki/drive 用于缓存消息中分享的飞书云文档（需重新授权生效）
+    OAUTH_SCOPES = ("im:message:readonly im:message.group_msg:get_as_user bitable:app "
+                    "im:chat:readonly offline_access "
+                    "docx:document:readonly wiki:wiki:readonly drive:drive:readonly")
 
     # ===== 应用配置 =====
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-this-to-a-random-secret-key")
@@ -33,6 +36,10 @@ class Config:
     DEFAULT_LOCAL_CACHE = os.environ.get("DEFAULT_LOCAL_CACHE", "true").lower() in ("true", "1", "yes")
     # 单个附件/图片大小上限（MB），超出自动在备注中记录跳过（默认 20MB）
     MAX_ATTACHMENT_SIZE_MB = int(os.environ.get("MAX_ATTACHMENT_SIZE_MB", "20"))
+    # 云文档快照缓存：单个文档最多转换的 Block 数，超出截断并标注（默认 2000）
+    MAX_DOC_BLOCKS = int(os.environ.get("MAX_DOC_BLOCKS", "2000"))
+    # 云文档快照缓存：是否下载文档内图片到 assets/docs/
+    CACHE_DOC_IMAGES = os.environ.get("CACHE_DOC_IMAGES", "true").lower() in ("true", "1", "yes")
 
     # 服务器配置
     HOST = os.environ.get("HOST", "0.0.0.0")

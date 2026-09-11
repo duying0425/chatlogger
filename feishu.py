@@ -288,6 +288,74 @@ class FeishuClient:
             filename = filename + ".jpg"
         return resp.content, filename
 
+    # ===== 云文档操作 =====
+
+    def get_docx_document(self, doc_token):
+        """获取新版文档元信息（标题等）。返回 document dict 或抛异常。"""
+        data = self._api_get(f"/docx/v1/documents/{doc_token}")
+        if data.get("code") != 0:
+            raise Exception(f"获取文档信息失败: {data.get('msg', data)}")
+        return data["data"]["document"]
+
+    def get_docx_blocks(self, doc_token):
+        """分页拉取新版文档全部 Block，返回 block 列表。"""
+        blocks = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500, "document_revision_id": -1}
+            if page_token:
+                params["page_token"] = page_token
+            data = self._api_get(f"/docx/v1/documents/{doc_token}/blocks", params=params)
+            if data.get("code") != 0:
+                raise Exception(f"获取文档内容失败: {data.get('msg', data)}")
+            d = data["data"]
+            blocks.extend(d.get("items", []))
+            if not d.get("has_more"):
+                break
+            page_token = d.get("page_token", "")
+            if not page_token:
+                break
+        return blocks
+
+    def get_wiki_node(self, wiki_token):
+        """解析 wiki 链接 token 对应的真实云文档节点。
+        返回 node dict（含 obj_token / obj_type / title）或抛异常。"""
+        data = self._api_get("/wiki/v2/spaces/get_node",
+                             params={"token": wiki_token, "obj_type": "wiki"})
+        if data.get("code") != 0:
+            raise Exception(f"解析知识库节点失败: {data.get('msg', data)}")
+        return data["data"]["node"]
+
+    def download_drive_media(self, file_token, max_size_mb=None):
+        """下载云文档内素材（如文档中的图片），返回 (bytes, ext)。"""
+        if max_size_mb is None:
+            max_size_mb = getattr(Config, "MAX_ATTACHMENT_SIZE_MB", 20)
+        url = f"{Config.API_BASE}/drive/v1/medias/{file_token}/download"
+        resp = _request_with_retry(
+            lambda: requests.get(url, headers=self._headers(), stream=True),
+            parse_json=False,
+        )
+        if resp.status_code != 200:
+            # 错误响应是 JSON（无权限等），尽量提取业务信息
+            try:
+                err = resp.json()
+                msg = err.get("msg") or err.get("error") or f"HTTP {resp.status_code}"
+            except Exception:
+                msg = f"HTTP {resp.status_code}"
+            raise Exception(f"下载文档素材失败: {msg}")
+        content_length = int(resp.headers.get("Content-Length", 0))
+        if content_length > max_size_mb * 1024 * 1024:
+            raise SizeExceededError(
+                f"文档图片 {content_length // 1024 // 1024}MB 超过最大允许 {max_size_mb}MB 限制")
+        # 扩展名优先从 Content-Type 推断
+        ctype = resp.headers.get("Content-Type", "")
+        ext = ""
+        for e in ("png", "jpeg", "jpg", "gif", "webp", "bmp"):
+            if e in ctype:
+                ext = "jpg" if e in ("jpeg", "jpg") else e
+                break
+        return resp.content, ext or "png"
+
     # ===== 多维表格操作 =====
 
     def create_bitable(self, name, table_name="消息记录"):
