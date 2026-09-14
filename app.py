@@ -225,6 +225,67 @@ def api_fetch_chat_name():
             warning = "应用未开通机器人能力，无法自动获取群名"
         return jsonify({"ok": False, "error": err_str, "warning": warning}), 200
 
+@app.route("/api/user_chats", methods=["GET"])
+def api_get_user_chats():
+    """获取用户所有已缓存的群聊列表（支持关键词搜索）"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    keyword = request.args.get("q", "").strip()
+    if keyword:
+        chats = models.search_user_chats_cache(user["id"], keyword)
+    else:
+        chats = models.get_user_chats_cache(user["id"])
+    meta = models.get_user_chats_cache_last_updated(user["id"])
+    return jsonify({
+        "ok": True,
+        "chats": chats,
+        "count": len(chats),
+        "total_cached": meta["count"],
+        "last_updated": meta["last_updated"],
+    })
+
+@app.route("/api/user_chats/sync", methods=["POST"])
+def api_sync_user_chats():
+    """从飞书全量拉取当前用户加入的所有群聊并刷新本地缓存"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    client = get_feishu_client()
+    if not client:
+        return jsonify({"error": "飞书未授权或登录已失效"}), 401
+
+    try:
+        chats_list = client.list_user_chats()
+        models.save_user_chats_cache(user["id"], chats_list)
+
+        # 刷新已配置群聊中缺失的 feishu_name
+        name_map = {c["chat_id"]: (c.get("name") or "").strip() for c in chats_list if c.get("chat_id")}
+        for c in models.get_chats(user["id"]):
+            cid = c["chat_id"]
+            if cid in name_map and name_map[cid] and name_map[cid] != c.get("feishu_name"):
+                models.update_chat_feishu_name(user["id"], cid, name_map[cid])
+
+        refreshed = models.get_user_chats_cache(user["id"])
+        meta = models.get_user_chats_cache_last_updated(user["id"])
+        return jsonify({
+            "ok": True,
+            "count": len(refreshed),
+            "chats": refreshed,
+            "last_updated": meta["last_updated"],
+            "message": f"成功同步 {len(refreshed)} 个群聊信息",
+        })
+    except Exception as e:
+        err_str = str(e)
+        warning = "同步群聊列表失败"
+        if "232025" in err_str:
+            warning = "应用未开通机器人能力，无法同步群聊列表。请在飞书开发者后台开通「机器人」能力"
+        elif "99991672" in err_str or "permission" in err_str.lower():
+            warning = "飞书权限不足，请申请「获取群信息 (im:chat:readonly)」权限"
+        return jsonify({"ok": False, "error": err_str, "warning": warning}), 200
+
 @app.route("/api/chats", methods=["POST"])
 def api_add_chat():
     user = get_current_user()
@@ -234,6 +295,9 @@ def api_add_chat():
     chat_id = request.json.get("chat_id", "").strip()
     if not chat_id:
         return jsonify({"error": "请输入群聊 ID"}), 400
+    raw_input = request.json.get("chat_id", "").strip()
+    if not raw_input:
+        return jsonify({"error": "请输入群聊名称或 ID"}), 400
 
     # 用户可手动指定群名称（可选）。留空则尝试拉取，再不行退化为 chat_id
     custom_name = (request.json.get("chat_name") or "").strip()
@@ -243,16 +307,49 @@ def api_add_chat():
     if local_cache_opt is None:
         local_cache_opt = Config.DEFAULT_LOCAL_CACHE
 
+    chat_id = None
+    resolved_feishu_name = ""
+
+    # 解析 chat_id：兼容群聊全称、部分群聊名称、chat_id (oc_xxx)
+    if raw_input.startswith("oc_"):
+        chat_id = raw_input
+    else:
+        # 尝试从用户缓存中检索
+        matches = models.search_user_chats_cache(user["id"], raw_input)
+        if len(matches) == 1:
+            chat_id = matches[0]["chat_id"]
+            resolved_feishu_name = matches[0]["chat_name"]
+        elif len(matches) > 1:
+            # 优先检查是否存在完全一致的群名称
+            exact_matches = [m for m in matches if m["chat_name"].strip() == raw_input]
+            if len(exact_matches) == 1:
+                chat_id = exact_matches[0]["chat_id"]
+                resolved_feishu_name = exact_matches[0]["chat_name"]
+            else:
+                names_preview = "、".join([f"「{m['chat_name']}」" for m in matches[:5]])
+                if len(matches) > 5:
+                    names_preview += f" 等 {len(matches)} 个群"
+                return jsonify({
+                    "error": f"匹配到多个群聊：{names_preview}，请在下拉列表中选择具体群聊"
+                }), 400
+        else:
+            return jsonify({
+                "error": f"未在缓存中找到名为“{raw_input}”的群聊。请点击输入框内的「同步群聊缓存」或直接输入以 oc_ 开头的群聊 ID"
+            }), 404
+
     # 检查是否已存在
     existing = models.get_chat(user["id"], chat_id)
     if existing:
         return jsonify({"error": "该群聊已存在"}), 409
+        return jsonify({"error": f"该群聊已存在（{existing.get('chat_name') or chat_id}）"}), 409
 
     # 无论是否自定义名称，都尝试拉取一次真实群名（用于列表第二行展示）
     feishu_name = ""
+    feishu_name = resolved_feishu_name
     name_fetch_error = ""
     client = get_feishu_client()
     if client:
+    if client and not feishu_name:
         try:
             chat_info = client.get_chat_info(chat_id)
             feishu_name = (chat_info.get("name") or "").strip()
@@ -266,6 +363,7 @@ def api_add_chat():
     models.add_chat(user["id"], chat_id, chat_name, local_cache=1 if local_cache_opt else 0,
                     feishu_name=feishu_name or None)
     result = {"ok": True, "chat_name": chat_name, "local_cache": bool(local_cache_opt)}
+    result = {"ok": True, "chat_name": chat_name, "chat_id": chat_id, "local_cache": bool(local_cache_opt)}
     if name_fetch_error:
         # 获取失败原因可见，不再静默退化为 chat_id
         warning = "已添加，但自动获取群名失败，暂用群聊 ID 代替"
@@ -1327,6 +1425,50 @@ INDEX_PAGE = r"""
         .name-fetch-tip.info { color: #00b42a; }
         .name-fetch-tip.warn { color: #ff7d00; }
         .name-fetch-tip.custom { color: #86909c; }
+
+        /* 群聊输入与下拉选择组件样式 */
+        .chat-input-wrapper { position: relative; flex: 1.3; min-width: 260px; }
+        .chat-input-wrapper input { width: 100%; padding-right: 50px; }
+        .chat-input-actions { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 4px; }
+        .chat-input-btn { cursor: pointer; color: #8f959e; font-size: 12px; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; transition: all 0.2s; user-select: none; }
+        .chat-input-btn:hover { background: #e5e6eb; color: #1f2329; }
+        .chat-dropdown-arrow { font-size: 13px; transition: transform 0.2s; }
+        .chat-dropdown-arrow.open { transform: rotate(180deg); }
+
+        /* 下拉面板 */
+        .chat-dropdown-panel { position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: white; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); border: 1px solid #dee0e3; z-index: 100; overflow: hidden; display: none; flex-direction: column; max-height: 380px; }
+        .chat-dropdown-panel.show { display: flex; }
+        
+        .dropdown-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #f7f8fa; border-bottom: 1px solid #ebeef5; font-size: 12px; color: #646a73; }
+        .dropdown-header .dropdown-tip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .btn-sync-cache { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: white; border: 1px solid #dee0e3; border-radius: 6px; font-size: 12px; color: #3370ff; cursor: pointer; font-weight: 500; transition: all 0.2s; flex-shrink: 0; }
+        .btn-sync-cache:hover { background: #e8f3ff; border-color: #3370ff; }
+        .btn-sync-cache.syncing { pointer-events: none; opacity: 0.7; }
+
+        .dropdown-list { overflow-y: auto; max-height: 280px; padding: 4px 0; overscroll-behavior: contain; }
+        .dropdown-item { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; transition: background 0.15s; border-bottom: 1px solid #f9fafb; text-align: left; }
+        .dropdown-item:last-child { border-bottom: none; }
+        .dropdown-item:hover, .dropdown-item.active { background: #f2f6ff; }
+        .item-avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #e8f3ff; color: #3370ff; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; }
+        .item-content { flex: 1; min-width: 0; }
+        .item-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .item-name { font-size: 13.5px; font-weight: 500; color: #1f2329; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .item-name mark { background: #ffe066; color: inherit; padding: 0 1px; border-radius: 2px; }
+        .item-tag-added { font-size: 11px; color: #86909c; background: #f2f3f5; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; font-weight: normal; }
+        .item-tag-dissolved { font-size: 11px; color: #d46b08; background: #fff7e6; border: 1px solid #ffd591; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; font-weight: normal; }
+        .item-sub-row { display: flex; align-items: center; gap: 8px; margin-top: 2px; font-size: 11.5px; color: #8f959e; }
+        .item-id { font-family: 'SF Mono', Consolas, monospace; background: #f7f8fa; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+        .item-id mark { background: #ffe066; color: inherit; padding: 0 1px; border-radius: 2px; }
+
+        /* 搜索无结果 / 空状态 */
+        .dropdown-empty { padding: 24px 16px; text-align: center; color: #646a73; }
+        .dropdown-empty-icon { font-size: 26px; margin-bottom: 8px; }
+        .dropdown-empty-text { font-size: 13px; color: #1f2329; font-weight: 600; margin-bottom: 4px; }
+        .dropdown-empty-desc { font-size: 12px; color: #8f959e; margin-bottom: 14px; line-height: 1.5; padding: 0 10px; }
+        .btn-empty-sync { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 18px; background: #3370ff; color: white; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 2px 6px rgba(51,112,255,0.25); }
+        .btn-empty-sync:hover { background: #2860e1; }
+        .btn-empty-sync:disabled { background: #c9cdd4; cursor: not-allowed; }
+        .sync-spin { display: inline-block; animation: spin 0.8s linear infinite; }
     </style>
 </head>
 <body>
@@ -1343,6 +1485,30 @@ INDEX_PAGE = r"""
             <h2>添加群聊</h2>
             <div class="input-row">
                 <input type="text" id="chatIdInput" placeholder="输入群聊 ID (oc_xxx)" />
+                <div class="chat-input-wrapper" id="chatInputWrapper">
+                    <input type="text" id="chatIdInput" placeholder="选择或搜索群聊名称 / 关键词 / 群聊 ID" autocomplete="off" />
+                    <div class="chat-input-actions">
+                        <span id="chatInputClear" class="chat-input-btn" title="清空输入" style="display:none;" onclick="clearChatInput(event)">✕</span>
+                        <span id="chatDropdownArrow" class="chat-input-btn chat-dropdown-arrow" title="展开/收起群聊列表" onclick="toggleDropdown(event)">▾</span>
+                    </div>
+                    <div class="chat-dropdown-panel" id="chatDropdownPanel">
+                        <div class="dropdown-header">
+                            <span id="dropdownCountTip" class="dropdown-tip">读取群聊缓存中...</span>
+                            <button type="button" class="btn-sync-cache" id="btnSyncCache" onclick="syncUserChats(event)" title="从飞书全量拉取已加入的群聊并更新缓存">
+                                <span class="sync-icon">🔄</span> <span class="sync-text">同步群聊缓存</span>
+                            </button>
+                        </div>
+                        <div class="dropdown-list" id="dropdownList"></div>
+                        <div class="dropdown-empty" id="dropdownEmpty" style="display:none;">
+                            <div class="dropdown-empty-icon">🔍</div>
+                            <div class="dropdown-empty-text" id="dropdownEmptyTitle">未找到匹配的群聊</div>
+                            <div class="dropdown-empty-desc" id="dropdownEmptyDesc">若群聊刚创建或刚加入，请点击下方同步；也可直接输入群聊 ID (oc_xxx) 添加</div>
+                            <button type="button" class="btn-empty-sync" id="btnEmptySync" onclick="syncUserChats(event)">
+                                <span class="sync-icon">🔄</span> <span class="sync-text">立即同步飞书所有群聊缓存</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
                 <div class="name-input-wrapper">
                     <input type="text" id="chatNameInput" placeholder="自定义名称（可选，留空用真实群名）" />
                     <span id="nameFetchSpinner" class="input-spinner" style="display:none;"></span>
@@ -1511,6 +1677,12 @@ INDEX_PAGE = r"""
             const chatId = input.value.trim();
             if (!chatId) return;
             const chatName = nameInput.value.trim();
+            const rawVal = input ? input.value.trim() : '';
+            if (!rawVal) return;
+
+            // 优先使用已选中的 chat_id，若无选中则使用输入文本（可能是群名或 oc_xxx）
+            const chatIdToSend = (typeof selectedChatId !== 'undefined' && selectedChatId) ? selectedChatId : rawVal;
+            const chatName = nameInput ? nameInput.value.trim() : '';
             const localCache = localCacheBox ? localCacheBox.checked : true;
             const resp = await fetch('/api/chats', {
                 method: 'POST',
@@ -1525,6 +1697,26 @@ INDEX_PAGE = r"""
             if (data.ok) {
                 if (data.warning) { sessionStorage.setItem('addChatWarning', data.warning); }
                 location.reload();
+
+            try {
+                const resp = await fetch('/api/chats', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatIdToSend,
+                        chat_name: chatName || undefined,
+                        local_cache: localCache
+                    }),
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    if (data.warning) { sessionStorage.setItem('addChatWarning', data.warning); }
+                    location.reload();
+                } else {
+                    showToast(data.error || '添加失败', 'error');
+                }
+            } catch (err) {
+                showToast('网络请求异常', 'error');
             }
             else { showToast(data.error || '添加失败', 'error'); }
         }
@@ -1923,13 +2115,331 @@ INDEX_PAGE = r"""
             }
         }
 
+        // ===== 群聊缓存与智能下拉选择逻辑 =====
+        let cachedUserChats = [];
+        let hasLoadedCache = false;
+        let selectedChatId = '';
+        let selectedChatName = '';
+        let activeDropdownIndex = -1;
+        let currentFilteredItems = [];
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function highlightMatch(text, query) {
+            if (!text) return '';
+            const safeText = escapeHtml(text);
+            if (!query) return safeText;
+            const safeQuery = escapeHtml(query);
+            try {
+                const regex = new RegExp('(' + safeQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+                return safeText.replace(regex, '<mark>$1</mark>');
+            } catch (e) {
+                return safeText;
+            }
+        }
+
+        async function loadUserChatsCache(force = false) {
+            if (hasLoadedCache && !force) return;
+            const tipEl = document.getElementById('dropdownCountTip');
+            if (tipEl) tipEl.textContent = '正在读取群聊缓存...';
+            try {
+                const resp = await fetch('/api/user_chats');
+                const data = await resp.json();
+                if (data.ok) {
+                    cachedUserChats = data.chats || [];
+                    hasLoadedCache = true;
+                    updateDropdownHeaderTip(cachedUserChats.length, data.last_updated);
+                } else {
+                    if (tipEl) tipEl.textContent = '获取群聊缓存失败';
+                }
+            } catch (e) {
+                if (tipEl) tipEl.textContent = '读取群聊缓存异常';
+            }
+        }
+
+        function updateDropdownHeaderTip(count, lastUpdated) {
+            const tipEl = document.getElementById('dropdownCountTip');
+            if (!tipEl) return;
+            if (count === 0) {
+                tipEl.textContent = '暂无已缓存群聊';
+            } else {
+                let timeStr = '';
+                if (lastUpdated) {
+                    try {
+                        const parts = lastUpdated.split(/[- :]/);
+                        if (parts.length >= 5) {
+                            timeStr = ' · ' + parseInt(parts[1]) + '月' + parseInt(parts[2]) + '日 ' + parts[3] + ':' + parts[4];
+                        }
+                    } catch(e) {}
+                }
+                tipEl.textContent = '已缓存 ' + count + ' 个群聊' + timeStr;
+            }
+        }
+
+        function openDropdown() {
+            const panel = document.getElementById('chatDropdownPanel');
+            const arrow = document.getElementById('chatDropdownArrow');
+            if (!panel) return;
+            panel.classList.add('show');
+            if (arrow) arrow.classList.add('open');
+            activeDropdownIndex = -1;
+
+            if (!hasLoadedCache) {
+                loadUserChatsCache().then(() => {
+                    const input = document.getElementById('chatIdInput');
+                    filterAndRenderDropdown(input ? input.value.trim() : '');
+                });
+            } else {
+                const input = document.getElementById('chatIdInput');
+                filterAndRenderDropdown(input ? input.value.trim() : '');
+            }
+        }
+
+        function closeDropdown() {
+            const panel = document.getElementById('chatDropdownPanel');
+            const arrow = document.getElementById('chatDropdownArrow');
+            if (!panel) return;
+            panel.classList.remove('show');
+            if (arrow) arrow.classList.remove('open');
+            activeDropdownIndex = -1;
+        }
+
+        function toggleDropdown(e) {
+            if (e) { e.preventDefault(); e.stopPropagation(); }
+            const panel = document.getElementById('chatDropdownPanel');
+            if (panel && panel.classList.contains('show')) {
+                closeDropdown();
+            } else {
+                const input = document.getElementById('chatIdInput');
+                if (input) input.focus();
+                openDropdown();
+            }
+        }
+
+        function clearChatInput(e) {
+            if (e) { e.preventDefault(); e.stopPropagation(); }
+            const input = document.getElementById('chatIdInput');
+            const clearBtn = document.getElementById('chatInputClear');
+            const tip = document.getElementById('nameFetchTip');
+            if (input) {
+                input.value = '';
+                input.focus();
+            }
+            selectedChatId = '';
+            selectedChatName = '';
+            if (clearBtn) clearBtn.style.display = 'none';
+            if (tip) tip.style.display = 'none';
+            filterAndRenderDropdown('');
+        }
+
+        function selectChat(chat) {
+            const input = document.getElementById('chatIdInput');
+            const nameInput = document.getElementById('chatNameInput');
+            const clearBtn = document.getElementById('chatInputClear');
+            const tip = document.getElementById('nameFetchTip');
+
+            selectedChatId = chat.chat_id;
+            selectedChatName = chat.chat_name || chat.chat_id;
+
+            if (input) {
+                input.value = selectedChatName;
+            }
+            if (clearBtn) clearBtn.style.display = 'inline-flex';
+
+            // 自动填充自定义群名框（若未被用户手动填写）
+            if (nameInput) {
+                if (!userHasCustomizedName || nameInput.value.trim() === '' || nameInput.value.trim() === lastAutoFilledName) {
+                    nameInput.value = chat.chat_name || '';
+                    lastAutoFilledName = chat.chat_name || '';
+                }
+            }
+
+            // 展示选中反馈
+            if (tip) {
+                tip.className = 'name-fetch-tip info';
+                tip.innerHTML = '✓ 已选择飞书群聊：<b>' + escapeHtml(selectedChatName) + '</b> <span style="font-family:monospace; font-size:11px; color:#4e5969; margin-left:4px;">(' + chat.chat_id + ')</span>';
+                const dissolvedNotice = (chat.chat_status === 'dissolved_save') ? ' <span style="color:#d46b08; font-size:11px; font-weight:500;">[已解散·保留历史]</span>' : '';
+                tip.innerHTML = '✓ 已选择飞书群聊：<b>' + escapeHtml(selectedChatName) + '</b>' + dissolvedNotice + ' <span style="font-family:monospace; font-size:11px; color:#4e5969; margin-left:4px;">(' + chat.chat_id + ')</span>';
+                tip.style.display = 'block';
+            }
+
+            closeDropdown();
+        }
+
+        function filterAndRenderDropdown(query) {
+            const listEl = document.getElementById('dropdownList');
+            const emptyEl = document.getElementById('dropdownEmpty');
+            const emptyTitle = document.getElementById('dropdownEmptyTitle');
+            const emptyDesc = document.getElementById('dropdownEmptyDesc');
+            if (!listEl || !emptyEl) return;
+
+            const q = (query || '').trim().toLowerCase();
+
+            // 若用户输入与之前选中的不一致，重置 selectedChatId
+            if (selectedChatName && query.trim() !== selectedChatName) {
+                selectedChatId = '';
+                selectedChatName = '';
+            }
+
+            // 过滤
+            if (!q) {
+                currentFilteredItems = cachedUserChats.slice();
+            } else {
+                currentFilteredItems = cachedUserChats.filter(c => {
+                    const name = (c.chat_name || '').toLowerCase();
+                    const id = (c.chat_id || '').toLowerCase();
+                    return name.includes(q) || id.includes(q);
+                });
+            }
+
+            // 渲染
+            if (currentFilteredItems.length > 0) {
+                listEl.style.display = 'block';
+                emptyEl.style.display = 'none';
+                let html = '';
+                for (let idx = 0; idx < currentFilteredItems.length; idx++) {
+                    const c = currentFilteredItems[idx];
+                    const avatarContent = c.avatar 
+                        ? '<img src="' + escapeHtml(c.avatar) + '" class="item-avatar" alt="">' 
+                        : '<div class="item-avatar">' + escapeHtml((c.chat_name || '群').charAt(0).toUpperCase()) + '</div>';
+                    const nameHtml = highlightMatch(c.chat_name || '未命名群聊', q);
+                    const idHtml = highlightMatch(c.chat_id, q);
+                    const tagHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
+                    const addedHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
+                    const dissolvedHtml = (c.chat_status === 'dissolved_save') ? '<span class="item-tag-dissolved" title="该群已解散，但飞书保留了历史消息，仍可归档">已解散(保留历史)</span>' : '';
+                    const tagHtml = addedHtml + dissolvedHtml;
+                    const descHtml = c.description ? '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="' + escapeHtml(c.description) + '">' + escapeHtml(c.description) + '</span>' : '';
+                    html += '<div class="dropdown-item' + (idx === activeDropdownIndex ? ' active' : '') + '" data-index="' + idx + '" onclick="handleItemClick(' + idx + ', event)">' +
+                        avatarContent +
+                        '<div class="item-content">' +
+                            '<div class="item-title-row">' +
+                                '<span class="item-name">' + nameHtml + '</span>' +
+                                tagHtml +
+                            '</div>' +
+                            '<div class="item-sub-row">' +
+                                '<span class="item-id">' + idHtml + '</span>' +
+                                (descHtml ? '<span>·</span>' + descHtml : '') +
+                            '</div>' +
+                        '</div>' +
+                    '</div>';
+                }
+                listEl.innerHTML = html;
+            } else {
+                listEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                if (cachedUserChats.length === 0) {
+                    emptyTitle.textContent = '暂无已缓存群聊';
+                    emptyDesc.textContent = '您尚未同步飞书群聊信息，点击下方按钮从飞书全量拉取您的群聊列表。';
+                } else {
+                    emptyTitle.textContent = '未找到与 “' + escapeHtml(query) + '” 匹配的群聊';
+                    emptyDesc.textContent = '若该群刚创建或刚加入，请点击下方同步最新群聊；也可直接输入以 oc_ 开头的群聊 ID 添加。';
+                }
+            }
+        }
+
+        function handleItemClick(index, event) {
+            if (event) { event.preventDefault(); event.stopPropagation(); }
+            if (currentFilteredItems[index]) {
+                selectChat(currentFilteredItems[index]);
+            }
+        }
+
+        function updateActiveDropdownItem() {
+            const items = document.querySelectorAll('#dropdownList .dropdown-item');
+            items.forEach((item, idx) => {
+                if (idx === activeDropdownIndex) {
+                    item.classList.add('active');
+                    item.scrollIntoView({ block: 'nearest' });
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+        }
+
+        async function syncUserChats(e) {
+            if (e) { e.preventDefault(); e.stopPropagation(); }
+            const btn1 = document.getElementById('btnSyncCache');
+            const btn2 = document.getElementById('btnEmptySync');
+
+            const setSyncing = (syncing) => {
+                if (btn1) {
+                    btn1.classList.toggle('syncing', syncing);
+                    const icon = btn1.querySelector('.sync-icon');
+                    if (icon) icon.className = syncing ? 'sync-icon sync-spin' : 'sync-icon';
+                    const txt = btn1.querySelector('.sync-text');
+                    if (txt) txt.textContent = syncing ? '正在同步...' : '同步群聊缓存';
+                }
+                if (btn2) {
+                    btn2.disabled = syncing;
+                    const icon = btn2.querySelector('.sync-icon');
+                    if (icon) icon.className = syncing ? 'sync-icon sync-spin' : 'sync-icon';
+                    const txt = btn2.querySelector('.sync-text');
+                    if (txt) txt.textContent = syncing ? '正在拉取飞书所有群聊...' : '立即同步飞书所有群聊缓存';
+                }
+            };
+
+            setSyncing(true);
+            try {
+                const resp = await fetch('/api/user_chats/sync', { method: 'POST' });
+                const data = await resp.json();
+                if (data.ok) {
+                    cachedUserChats = data.chats || [];
+                    hasLoadedCache = true;
+                    updateDropdownHeaderTip(cachedUserChats.length, data.last_updated);
+                    showToast(data.message || ('同步成功，已缓存 ' + cachedUserChats.length + ' 个群聊'), 'success');
+                    const input = document.getElementById('chatIdInput');
+                    filterAndRenderDropdown(input ? input.value.trim() : '');
+                } else {
+                    showToast(data.warning || data.error || '同步群聊失败', 'error');
+                }
+            } catch (err) {
+                showToast('同步群聊网络异常', 'error');
+            } finally {
+                setSyncing(false);
+            }
+        }
+
+        // 点击外部区域自动关闭群聊下拉面板
+        document.addEventListener('click', function(e) {
+            const wrapper = document.getElementById('chatInputWrapper');
+            if (wrapper && !wrapper.contains(e.target)) {
+                closeDropdown();
+            }
+        });
+
         const chatIdEl = document.getElementById('chatIdInput');
         const chatNameEl = document.getElementById('chatNameInput');
 
         if (chatIdEl) {
+            chatIdEl.addEventListener('focus', function() {
+                openDropdown();
+            });
+            chatIdEl.addEventListener('click', function() {
+                openDropdown();
+            });
             chatIdEl.addEventListener('input', function() {
                 if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
                 fetchDebounceTimer = setTimeout(() => tryFetchChatName(), 600);
+                const val = chatIdEl.value.trim();
+                const clearBtn = document.getElementById('chatInputClear');
+                if (clearBtn) clearBtn.style.display = val ? 'inline-flex' : 'none';
+
+                openDropdown();
+                filterAndRenderDropdown(val);
+
+                // 若输入以 oc_ 开头，触发飞书预拉取名称
+                if (val.startsWith('oc_')) {
+                    if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+                    fetchDebounceTimer = setTimeout(() => tryFetchChatName(), 600);
+                }
             });
             chatIdEl.addEventListener('blur', function() {
                 if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
@@ -1939,10 +2449,47 @@ INDEX_PAGE = r"""
                 setTimeout(() => {
                     if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
                     tryFetchChatName();
+                    const val = chatIdEl.value.trim();
+                    const clearBtn = document.getElementById('chatInputClear');
+                    if (clearBtn) clearBtn.style.display = val ? 'inline-flex' : 'none';
+                    openDropdown();
+                    filterAndRenderDropdown(val);
+                    if (val.startsWith('oc_')) {
+                        if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+                        tryFetchChatName();
+                    }
                 }, 50);
             });
             chatIdEl.addEventListener('keydown', function(e) {
                 if (e.key === 'Enter') addChat();
+                const panel = document.getElementById('chatDropdownPanel');
+                const isDropdownOpen = panel && panel.classList.contains('show');
+
+                if (e.key === 'ArrowDown') {
+                    if (!isDropdownOpen) {
+                        openDropdown();
+                    } else if (currentFilteredItems.length > 0) {
+                        e.preventDefault();
+                        activeDropdownIndex = (activeDropdownIndex + 1) % currentFilteredItems.length;
+                        updateActiveDropdownItem();
+                    }
+                } else if (e.key === 'ArrowUp') {
+                    if (isDropdownOpen && currentFilteredItems.length > 0) {
+                        e.preventDefault();
+                        activeDropdownIndex = (activeDropdownIndex - 1 + currentFilteredItems.length) % currentFilteredItems.length;
+                        updateActiveDropdownItem();
+                    }
+                } else if (e.key === 'Enter') {
+                    if (isDropdownOpen && activeDropdownIndex >= 0 && currentFilteredItems[activeDropdownIndex]) {
+                        e.preventDefault();
+                        selectChat(currentFilteredItems[activeDropdownIndex]);
+                    } else {
+                        closeDropdown();
+                        addChat();
+                    }
+                } else if (e.key === 'Escape') {
+                    closeDropdown();
+                }
             });
         }
 

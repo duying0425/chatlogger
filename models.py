@@ -61,6 +61,24 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # 用户群聊信息缓存表：缓存该用户在飞书加入的所有群聊
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_chats_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            chat_id TEXT NOT NULL,
+            chat_name TEXT,
+            avatar TEXT,
+            description TEXT,
+            chat_status TEXT DEFAULT 'normal',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, chat_id)
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_user_chats_cache_user ON user_chats_cache(user_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_user_chats_cache_user_name ON user_chats_cache(user_id, chat_name)")
+
     conn.commit()
     conn.close()
 
@@ -192,3 +210,95 @@ def update_chat_sync_status(user_id, chat_id, last_position, record_count):
     )
     conn.commit()
     conn.close()
+
+# ===== 用户群聊列表缓存操作 =====
+
+def save_user_chats_cache(user_id, chats_list):
+    """保存/刷新当前用户的群聊缓存列表"""
+    conn = get_db()
+    try:
+        # 使用事务：先清除当前用户的旧缓存，再批量写入最新群聊
+        conn.execute("DELETE FROM user_chats_cache WHERE user_id = ?", (user_id,))
+        for c in chats_list:
+            chat_id = c.get("chat_id")
+            if not chat_id:
+                continue
+            chat_name = (c.get("name") or c.get("chat_name") or "").strip()
+            avatar = c.get("avatar") or ""
+            description = c.get("description") or ""
+            chat_status = c.get("chat_status") or "normal"
+            conn.execute("""
+                INSERT INTO user_chats_cache (user_id, chat_id, chat_name, avatar, description, chat_status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (user_id, chat_id, chat_name, avatar, description, chat_status))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_user_chats_cache(user_id):
+    """获取当前用户的所有已缓存群聊，并标记哪些群聊已被添加到已配置列表中（is_added）"""
+    conn = get_db()
+    added_rows = conn.execute("SELECT chat_id FROM chats WHERE user_id = ?", (user_id,)).fetchall()
+    added_ids = {r["chat_id"] for r in added_rows}
+
+    rows = conn.execute("""
+        SELECT chat_id, chat_name, avatar, description, chat_status, updated_at
+        FROM user_chats_cache
+        WHERE user_id = ?
+        ORDER BY chat_name COLLATE NOCASE ASC
+    """, (user_id,)).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["name"] = d.get("chat_name") or ""
+        d["is_added"] = d["chat_id"] in added_ids
+        result.append(d)
+    return result
+
+def search_user_chats_cache(user_id, keyword):
+    """根据群名称、部分群名称或 chat_id 检索已缓存的群聊，按相关度排序"""
+    if not keyword:
+        return get_user_chats_cache(user_id)
+    keyword = keyword.strip()
+    conn = get_db()
+    added_rows = conn.execute("SELECT chat_id FROM chats WHERE user_id = ?", (user_id,)).fetchall()
+    added_ids = {r["chat_id"] for r in added_rows}
+
+    kw_like = f"%{keyword}%"
+    rows = conn.execute("""
+        SELECT chat_id, chat_name, avatar, description, chat_status, updated_at
+        FROM user_chats_cache
+        WHERE user_id = ? AND (
+            chat_name LIKE ? OR chat_id LIKE ?
+        )
+        ORDER BY 
+            CASE WHEN chat_id = ? THEN 1
+                 WHEN LOWER(chat_name) = LOWER(?) THEN 2
+                 WHEN chat_name LIKE ? THEN 3
+                 ELSE 4 END,
+            chat_name COLLATE NOCASE ASC
+    """, (user_id, kw_like, kw_like, keyword, keyword, f"{keyword}%")).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["name"] = d.get("chat_name") or ""
+        d["is_added"] = d["chat_id"] in added_ids
+        result.append(d)
+    return result
+
+def get_user_chats_cache_last_updated(user_id):
+    """获取当前用户群聊缓存的最新更新时间及群聊总数"""
+    conn = get_db()
+    row = conn.execute("""
+        SELECT MAX(updated_at) as last_updated, COUNT(*) as count 
+        FROM user_chats_cache 
+        WHERE user_id = ?
+    """, (user_id,)).fetchone()
+    conn.close()
+    if row:
+        return {"last_updated": row["last_updated"], "count": row["count"]}
+    return {"last_updated": None, "count": 0}

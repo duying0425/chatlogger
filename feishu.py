@@ -180,6 +180,40 @@ class FeishuClient:
             raise Exception(f"获取群信息失败: {data}")
         return data["data"]
 
+    def list_user_chats(self, page_size=100):
+        """获取当前用户加入的所有群聊列表（自动分页遍历）。
+        使用 user_access_token 调用，按照创建时间升序排列。
+        """
+        all_chats = []
+        page_token = None
+        while True:
+            params = {
+                "page_size": min(page_size, 100),
+                "sort_type": "ByCreateTimeAsc",
+            }
+            if page_token:
+                params["page_token"] = page_token
+            data = self._api_get("/im/v1/chats", params=params)
+            if data.get("code") != 0:
+                raise Exception(f"获取群列表失败: {data}")
+            data_body = data.get("data", {})
+            items = data_body.get("items", []) or []
+            for item in items:
+                # 过滤已解散的群聊
+                # 飞书群状态 chat_status 说明：
+                # - 'normal': 正常使用中群聊
+                # - 'dissolved_save': 群已解散，但飞书保留了历史消息，用户仍可查看和归档历史记录（予以保留并展示）
+                # - 'dissolved': 群已彻底解散且不保留，飞书中已无法查看该群，拉取消息会报错（予以过滤）
+                if item.get("chat_status") == "dissolved":
+                    continue
+                all_chats.append(item)
+            if not data_body.get("has_more"):
+                break
+            page_token = data_body.get("page_token")
+            if not page_token:
+                break
+        return all_chats
+
     def get_chat_members_safe(self, chat_id):
         """尝试获取群成员姓名映射表 {open_id: name}。
         如果应用未申请或未通过相关权限，安全静默降级并返回空字典，绝不阻断主流程。
