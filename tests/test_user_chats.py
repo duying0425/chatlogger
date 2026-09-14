@@ -125,9 +125,6 @@ class UserChatsTestSuite(unittest.TestCase):
         ]
 
         chats = client.list_user_chats(page_size=100)
-        self.assertEqual(len(chats), 2)
-        self.assertEqual(chats[0]["chat_id"], "oc_p1_1")
-        self.assertEqual(chats[1]["chat_id"], "oc_p2_1")
         # 彻底解散的 oc_p1_2 应被过滤，解散保留历史的 oc_p1_3 应予以保留
         self.assertEqual(len(chats), 3)
         chat_ids = [c["chat_id"] for c in chats]
@@ -278,4 +275,59 @@ class UserChatsTestSuite(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
         data = resp.get_json()
         self.assertIn("未在缓存中找到", data.get("error", ""))
+
+    # ===== 全部开始同步 (/api/sync_all) 测试 =====
+
+    def test_sync_all_unauthorized(self):
+        """未登录调用全部开始同步接口返回 401"""
+        resp = self.client.post("/api/sync_all")
+        self.assertEqual(resp.status_code, 401)
+        data = resp.get_json()
+        self.assertIn("未登录", data.get("error", ""))
+
+    @patch("app.get_feishu_client")
+    def test_sync_all_no_chats(self, mock_client):
+        """没有配置任何群聊时，返回 400 提示"""
+        mock_client.return_value = MagicMock()
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+
+        resp = self.client.post("/api/sync_all")
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("暂无可同步", data.get("error", ""))
+
+    @patch("app._run_sync")
+    @patch("app.get_feishu_client")
+    def test_sync_all_success_and_skips_running(self, mock_client, mock_run_sync):
+        """测试全部开始同步批量启动及对已在运行任务的自动跳过"""
+        import app as app_module
+        mock_client.return_value = MagicMock()
+        models.add_chat(self.user["id"], "oc_batch_1", "群聊1")
+        models.add_chat(self.user["id"], "oc_batch_2", "群聊2")
+        models.add_chat(self.user["id"], "oc_batch_3", "群聊3")
+
+        # 模拟 oc_batch_2 已在运行中
+        app_module._set_progress("oc_batch_2", running=True, stage="fetching_messages")
+
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+
+        try:
+            resp = self.client.post("/api/sync_all")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertTrue(data.get("ok"))
+            self.assertEqual(data.get("total"), 3)
+            self.assertEqual(len(data.get("started", [])), 2)
+            self.assertIn("oc_batch_1", data.get("started"))
+            self.assertIn("oc_batch_3", data.get("started"))
+            self.assertEqual(data.get("skipped"), ["oc_batch_2"])
+            self.assertIn("已启动 2 个群聊", data.get("message"))
+            self.assertIn("1 个群聊已在同步中", data.get("message"))
+        finally:
+            # 清理 progress
+            app_module._set_progress("oc_batch_1", stage="idle", running=False)
+            app_module._set_progress("oc_batch_2", stage="idle", running=False)
+            app_module._set_progress("oc_batch_3", stage="idle", running=False)
 

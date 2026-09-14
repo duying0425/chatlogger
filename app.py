@@ -340,15 +340,12 @@ def api_add_chat():
     # 检查是否已存在
     existing = models.get_chat(user["id"], chat_id)
     if existing:
-        return jsonify({"error": "该群聊已存在"}), 409
         return jsonify({"error": f"该群聊已存在（{existing.get('chat_name') or chat_id}）"}), 409
 
     # 无论是否自定义名称，都尝试拉取一次真实群名（用于列表第二行展示）
-    feishu_name = ""
     feishu_name = resolved_feishu_name
     name_fetch_error = ""
     client = get_feishu_client()
-    if client:
     if client and not feishu_name:
         try:
             chat_info = client.get_chat_info(chat_id)
@@ -362,7 +359,6 @@ def api_add_chat():
 
     models.add_chat(user["id"], chat_id, chat_name, local_cache=1 if local_cache_opt else 0,
                     feishu_name=feishu_name or None)
-    result = {"ok": True, "chat_name": chat_name, "local_cache": bool(local_cache_opt)}
     result = {"ok": True, "chat_name": chat_name, "chat_id": chat_id, "local_cache": bool(local_cache_opt)}
     if name_fetch_error:
         # 获取失败原因可见，不再静默退化为 chat_id
@@ -570,6 +566,47 @@ def api_sync(chat_id):
     t.start()
 
     return jsonify({"ok": True, "message": "同步任务已启动", "started": True})
+
+
+@app.route("/api/sync_all", methods=["POST"])
+def api_sync_all():
+    """批量启动当前用户所有已配置群聊的同步任务"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    client = get_feishu_client()
+    if not client:
+        return jsonify({"error": "Token 无效，请重新登录"}), 401
+
+    chats = models.get_chats(user["id"])
+    if not chats:
+        return jsonify({"error": "暂无可同步的群聊配置"}), 400
+
+    started = []
+    skipped = []
+    for c in chats:
+        cid = c["chat_id"]
+        progress = _get_progress(cid)
+        if progress and progress.get("running"):
+            skipped.append(cid)
+            continue
+        _set_progress(cid, stage="starting", current=0, total=0, message="准备开始同步...", running=True)
+        t = threading.Thread(target=_run_sync, args=(user["id"], cid), daemon=True)
+        t.start()
+        started.append(cid)
+
+    msg = f"已启动 {len(started)} 个群聊的同步任务"
+    if skipped:
+        msg += f"，{len(skipped)} 个群聊已在同步中（跳过）"
+
+    return jsonify({
+        "ok": True,
+        "started": started,
+        "skipped": skipped,
+        "total": len(chats),
+        "message": msg,
+    })
 
 
 @app.route("/api/sync_status/<chat_id>", methods=["GET"])
@@ -1412,6 +1449,11 @@ INDEX_PAGE = r"""
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
         .section-title { font-size: 16px; font-weight: 600; color: #1f2329; }
         .chat-count { font-size: 13px; color: #8f959e; font-weight: normal; margin-left: 6px; }
+        .section-actions { display: flex; align-items: center; gap: 12px; }
+        .btn-sync-all { display: inline-flex; align-items: center; gap: 6px; padding: 7px 15px; background: #00b42a; color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 1px 3px rgba(0, 180, 42, 0.2); }
+        .btn-sync-all:hover { background: #009a25; }
+        .btn-sync-all:disabled { background: #c9cdd4; cursor: not-allowed; box-shadow: none; }
+        .btn-sync-all.syncing .sync-icon { display: inline-block; animation: spin 0.8s linear infinite; }
         .search-box { position: relative; }
         .search-box input { padding: 7px 14px 7px 32px; border: 1px solid #dee0e3; border-radius: 8px; font-size: 13px; outline: none; width: 220px; transition: all 0.2s; background: white; }
         .search-box input:focus { border-color: #3370ff; box-shadow: 0 0 0 2px rgba(51,112,255,0.15); width: 250px; }
@@ -1484,7 +1526,6 @@ INDEX_PAGE = r"""
         <div class="add-chat">
             <h2>添加群聊</h2>
             <div class="input-row">
-                <input type="text" id="chatIdInput" placeholder="输入群聊 ID (oc_xxx)" />
                 <div class="chat-input-wrapper" id="chatInputWrapper">
                     <input type="text" id="chatIdInput" placeholder="选择或搜索群聊名称 / 关键词 / 群聊 ID" autocomplete="off" />
                     <div class="chat-input-actions">
@@ -1529,9 +1570,14 @@ INDEX_PAGE = r"""
                 {% if chats %}<span class="chat-count">({{ chats|length }})</span>{% endif %}
             </div>
             {% if chats %}
-            <div class="search-box">
-                <span class="search-icon">🔍</span>
-                <input type="text" id="chatSearchInput" placeholder="搜索群聊名称或 ID..." oninput="filterChats()" />
+            <div class="section-actions">
+                <button type="button" class="btn-sync-all" id="btnSyncAll" onclick="syncAllChats()" title="一键启动所有已配置群聊的消息同步">
+                    <span class="sync-icon">⚡</span> <span class="sync-text">全部开始同步</span>
+                </button>
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="chatSearchInput" placeholder="搜索群聊名称或 ID..." oninput="filterChats()" />
+                </div>
             </div>
             {% endif %}
         </div>
@@ -1674,9 +1720,6 @@ INDEX_PAGE = r"""
             const input = document.getElementById('chatIdInput');
             const nameInput = document.getElementById('chatNameInput');
             const localCacheBox = document.getElementById('localCacheCheckbox');
-            const chatId = input.value.trim();
-            if (!chatId) return;
-            const chatName = nameInput.value.trim();
             const rawVal = input ? input.value.trim() : '';
             if (!rawVal) return;
 
@@ -1684,19 +1727,6 @@ INDEX_PAGE = r"""
             const chatIdToSend = (typeof selectedChatId !== 'undefined' && selectedChatId) ? selectedChatId : rawVal;
             const chatName = nameInput ? nameInput.value.trim() : '';
             const localCache = localCacheBox ? localCacheBox.checked : true;
-            const resp = await fetch('/api/chats', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    chat_name: chatName || undefined,
-                    local_cache: localCache
-                }),
-            });
-            const data = await resp.json();
-            if (data.ok) {
-                if (data.warning) { sessionStorage.setItem('addChatWarning', data.warning); }
-                location.reload();
 
             try {
                 const resp = await fetch('/api/chats', {
@@ -1718,7 +1748,6 @@ INDEX_PAGE = r"""
             } catch (err) {
                 showToast('网络请求异常', 'error');
             }
-            else { showToast(data.error || '添加失败', 'error'); }
         }
 
         let pendingDeleteChatId = null;
@@ -1954,6 +1983,74 @@ INDEX_PAGE = r"""
             }
         }
 
+        let allSyncMonitorTimer = null;
+
+        function setSyncAllButtonState(isSyncing) {
+            const btn = document.getElementById('btnSyncAll');
+            if (!btn) return;
+            const icon = btn.querySelector('.sync-icon');
+            const text = btn.querySelector('.sync-text');
+            if (isSyncing) {
+                btn.disabled = true;
+                btn.classList.add('syncing');
+                if (icon) icon.textContent = '🔄';
+                if (text) text.textContent = '全部同步中...';
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('syncing');
+                if (icon) icon.textContent = '⚡';
+                if (text) text.textContent = '全部开始同步';
+            }
+        }
+
+        function monitorAllSyncProgress() {
+            if (allSyncMonitorTimer) return;
+            setSyncAllButtonState(true);
+            allSyncMonitorTimer = setInterval(() => {
+                const syncingItems = document.querySelectorAll('.chat-item.status-syncing');
+                if (syncingItems.length === 0) {
+                    clearInterval(allSyncMonitorTimer);
+                    allSyncMonitorTimer = null;
+                    setSyncAllButtonState(false);
+                }
+            }, 1000);
+        }
+
+        async function syncAllChats() {
+            const btn = document.getElementById('btnSyncAll');
+            if (btn && btn.disabled) return;
+            setSyncAllButtonState(true);
+
+            try {
+                const resp = await fetch('/api/sync_all', { method: 'POST' });
+                const data = await resp.json();
+                if (data.ok) {
+                    showToast(data.message || '已启动全部群聊同步', 'success');
+                    const startedSet = new Set(data.started || []);
+                    document.querySelectorAll('.chat-item').forEach(item => {
+                        const cid = item.getAttribute('data-chat-id');
+                        if (cid && startedSet.has(cid)) {
+                            const chatBtn = item.querySelector('.btn-sync');
+                            if (chatBtn) {
+                                chatBtn.disabled = true;
+                                chatBtn.textContent = '同步中...';
+                            }
+                            updateProgressUI(cid, { stage: 'starting', current: 0, total: 0, message: '准备开始同步...' });
+                            updateChatStatus(cid, 'syncing', '同步中');
+                            startPolling(cid, chatBtn);
+                        }
+                    });
+                    monitorAllSyncProgress();
+                } else {
+                    showToast(data.error || '全部同步启动失败', 'error');
+                    setSyncAllButtonState(false);
+                }
+            } catch (e) {
+                showToast('网络请求异常', 'error');
+                setSyncAllButtonState(false);
+            }
+        }
+
         // 页面加载后实时查询每个群的待同步条数
         document.addEventListener('DOMContentLoaded', () => {
             document.querySelectorAll('.stats').forEach(async (el) => {
@@ -1989,13 +2086,10 @@ INDEX_PAGE = r"""
                         updateProgressUI(chatId, sp);
                         updateChatStatus(chatId, 'syncing', '同步中');
                         startPolling(chatId, btn);
+                        monitorAllSyncProgress();
                     }
                 } catch (e) {}
             });
-        });
-
-        document.getElementById('chatIdInput').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') addChat();
         });
         // ===== 群名称自动获取与防覆写逻辑 =====
         let userHasCustomizedName = false;

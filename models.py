@@ -3,13 +3,15 @@ import os
 from config import Config
 
 def get_db():
-    conn = sqlite3.connect(Config.DB_PATH)
+    conn = sqlite3.connect(Config.DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
 
     # 用户表：存储 OAuth token
     c.execute("""
