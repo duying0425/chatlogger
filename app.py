@@ -581,7 +581,6 @@ def api_sync(chat_id):
 
 @app.route("/api/sync_all", methods=["POST"])
 def api_sync_all():
-    """批量启动当前用户所有已配置群聊的同步任务"""
     """批量启动当前用户已配置群聊的同步任务（支持前端指定 chat_ids 过滤）"""
     user = get_current_user()
     if not user:
@@ -2196,7 +2195,6 @@ INDEX_PAGE = r"""
             setSyncAllButtonState(true);
 
             try {
-                const resp = await fetch('/api/sync_all', { method: 'POST' });
                 const resp = await fetch('/api/sync_all', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2204,14 +2202,12 @@ INDEX_PAGE = r"""
                 });
                 const data = await resp.json();
                 if (data.ok) {
-                    showToast(data.message || '已启动全部群聊同步', 'success');
                     let tipMsg = data.message;
                     if (alreadySyncedCount > 0 && data.started && data.started.length > 0) {
                         tipMsg = '已启动 ' + data.started.length + ' 个待同步群聊（自动跳过 ' + alreadySyncedCount + ' 个已同步满群聊）';
                     }
                     showToast(tipMsg || '已启动群聊同步任务', 'success');
                     const startedSet = new Set(data.started || []);
-                    document.querySelectorAll('.chat-item').forEach(item => {
                     items.forEach(item => {
                         const cid = item.getAttribute('data-chat-id');
                         if (cid && startedSet.has(cid)) {
@@ -2225,7 +2221,6 @@ INDEX_PAGE = r"""
                             startPolling(cid, chatBtn);
                         }
                     });
-                    monitorAllSyncProgress();
                     if (data.started && data.started.length > 0) {
                         monitorAllSyncProgress();
                     } else {
@@ -2266,7 +2261,14 @@ INDEX_PAGE = r"""
                 if (!chatId) return;
                 try {
                     const resp = await fetch('/api/chat_stats/' + chatId);
-                    const data = await resp.json();
+                    let data;
+                    try {
+                        data = await resp.json();
+                    } catch (parseErr) {
+                        el.textContent = '服务异常 (' + resp.status + ')';
+                        updateChatStatus(chatId, 'error', '查询异常');
+                        return;
+                    }
                     if (data.error) {
                         el.textContent = data.error;
                         updateChatStatus(chatId, 'error', '查询失败');
@@ -2295,7 +2297,8 @@ INDEX_PAGE = r"""
                         }
                     }
                 } catch (e) {
-                    // 查询失败保持原状
+                    el.textContent = '网络异常';
+                    updateChatStatus(chatId, 'error', '网络异常');
                 }
                 // 顺便检查是否有正在运行的后台同步任务（支持刷新页面后恢复进度显示）
                 try {
