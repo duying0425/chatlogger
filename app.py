@@ -172,7 +172,6 @@ def api_get_chats():
 
 @app.route("/api/chat_stats/<chat_id>", methods=["GET"])
 def api_chat_stats(chat_id):
-    """实时查询群消息总数，返回已同步/待同步条数"""
     """实时查询群消息总数，返回已同步/待同步条数与最新消息时间"""
     user = get_current_user()
     if not user:
@@ -186,7 +185,6 @@ def api_chat_stats(chat_id):
         return jsonify({"error": "群聊未配置"}), 404
 
     try:
-        total = client.get_chat_message_count(chat_id)
         meta = client.get_chat_latest_meta(chat_id)
         total = meta.get("total", 0)
         latest_create_time = meta.get("latest_create_time", 0)
@@ -583,7 +581,6 @@ def api_sync(chat_id):
 
 @app.route("/api/sync_all", methods=["POST"])
 def api_sync_all():
-    """批量启动当前用户所有已配置群聊的同步任务"""
     """批量启动当前用户已配置群聊的同步任务（支持前端指定 chat_ids 过滤）"""
     user = get_current_user()
     if not user:
@@ -1739,7 +1736,6 @@ INDEX_PAGE = r"""
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
-                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}">
                 <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
                     <div class="chat-info" {% if chat.has_cache %}onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览"{% endif %}>
                         <div class="name-row">
@@ -2240,7 +2236,6 @@ INDEX_PAGE = r"""
             }
         }
 
-        // 页面加载后实时查询每个群的待同步条数
         function sortChatListByLatestTime() {
             const list = document.getElementById('chatList');
             if (!list) return;
@@ -2302,7 +2297,6 @@ INDEX_PAGE = r"""
                         }
                     }
                 } catch (e) {
-                    // 查询失败保持原状
                     el.textContent = '网络异常';
                     updateChatStatus(chatId, 'error', '网络异常');
                 }
