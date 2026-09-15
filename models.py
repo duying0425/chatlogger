@@ -85,11 +85,23 @@ def init_db():
             avatar TEXT,
             description TEXT,
             chat_status TEXT DEFAULT 'normal',
+            owner_id TEXT,
+            is_owner INTEGER DEFAULT 0,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
             UNIQUE(user_id, chat_id)
         )
     """)
+    # 迁移：检查 user_chats_cache 表是否已有 owner_id / is_owner 字段
+    try:
+        c.execute("ALTER TABLE user_chats_cache ADD COLUMN owner_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE user_chats_cache ADD COLUMN is_owner INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     c.execute("CREATE INDEX IF NOT EXISTS idx_user_chats_cache_user ON user_chats_cache(user_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_user_chats_cache_user_name ON user_chats_cache(user_id, chat_name)")
 
@@ -282,6 +294,9 @@ def save_user_chats_cache(user_id, chats_list):
     """保存/刷新当前用户的群聊缓存列表"""
     conn = get_db()
     try:
+        user_row = conn.execute("SELECT open_id FROM users WHERE id = ?", (user_id,)).fetchone()
+        user_open_id = user_row["open_id"] if user_row else ""
+
         # 使用事务：先清除当前用户的旧缓存，再批量写入最新群聊
         conn.execute("DELETE FROM user_chats_cache WHERE user_id = ?", (user_id,))
         for c in chats_list:
@@ -292,25 +307,27 @@ def save_user_chats_cache(user_id, chats_list):
             avatar = c.get("avatar") or ""
             description = c.get("description") or ""
             chat_status = c.get("chat_status") or "normal"
+            owner_id = c.get("owner_id") or ""
+            is_owner = 1 if (owner_id and user_open_id and owner_id == user_open_id) else 0
             conn.execute("""
-                INSERT INTO user_chats_cache (user_id, chat_id, chat_name, avatar, description, chat_status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (user_id, chat_id, chat_name, avatar, description, chat_status))
+                INSERT INTO user_chats_cache (user_id, chat_id, chat_name, avatar, description, chat_status, owner_id, is_owner, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (user_id, chat_id, chat_name, avatar, description, chat_status, owner_id, is_owner))
         conn.commit()
     finally:
         conn.close()
 
 def get_user_chats_cache(user_id):
-    """获取当前用户的所有已缓存群聊，并标记哪些群聊已被添加到已配置列表中（is_added）"""
+    """获取当前用户的所有已缓存群聊，按创建时间降序（最新创建排前），并标记已配置与群主状态"""
     conn = get_db()
     added_rows = conn.execute("SELECT chat_id FROM chats WHERE user_id = ?", (user_id,)).fetchall()
     added_ids = {r["chat_id"] for r in added_rows}
 
     rows = conn.execute("""
-        SELECT chat_id, chat_name, avatar, description, chat_status, updated_at
+        SELECT chat_id, chat_name, avatar, description, chat_status, owner_id, is_owner, updated_at
         FROM user_chats_cache
         WHERE user_id = ?
-        ORDER BY chat_name COLLATE NOCASE ASC
+        ORDER BY id DESC
     """, (user_id,)).fetchall()
     conn.close()
 
@@ -319,11 +336,12 @@ def get_user_chats_cache(user_id):
         d = dict(r)
         d["name"] = d.get("chat_name") or ""
         d["is_added"] = d["chat_id"] in added_ids
+        d["is_owner"] = bool(d.get("is_owner"))
         result.append(d)
     return result
 
 def search_user_chats_cache(user_id, keyword):
-    """根据群名称、部分群名称或 chat_id 检索已缓存的群聊，按相关度排序"""
+    """根据群名称、部分群名称或 chat_id 检索已缓存的群聊，按相关度与创建时间降序排序"""
     if not keyword:
         return get_user_chats_cache(user_id)
     keyword = keyword.strip()
@@ -333,7 +351,7 @@ def search_user_chats_cache(user_id, keyword):
 
     kw_like = f"%{keyword}%"
     rows = conn.execute("""
-        SELECT chat_id, chat_name, avatar, description, chat_status, updated_at
+        SELECT chat_id, chat_name, avatar, description, chat_status, owner_id, is_owner, updated_at
         FROM user_chats_cache
         WHERE user_id = ? AND (
             chat_name LIKE ? OR chat_id LIKE ?
@@ -343,7 +361,7 @@ def search_user_chats_cache(user_id, keyword):
                  WHEN LOWER(chat_name) = LOWER(?) THEN 2
                  WHEN chat_name LIKE ? THEN 3
                  ELSE 4 END,
-            chat_name COLLATE NOCASE ASC
+            id DESC
     """, (user_id, kw_like, kw_like, keyword, keyword, f"{keyword}%")).fetchall()
     conn.close()
 
@@ -352,6 +370,7 @@ def search_user_chats_cache(user_id, keyword):
         d = dict(r)
         d["name"] = d.get("chat_name") or ""
         d["is_added"] = d["chat_id"] in added_ids
+        d["is_owner"] = bool(d.get("is_owner"))
         result.append(d)
     return result
 

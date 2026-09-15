@@ -190,6 +190,7 @@ class FeishuClient:
             params = {
                 "page_size": min(page_size, 100),
                 "sort_type": "ByCreateTimeAsc",
+                "user_id_type": "open_id",
             }
             if page_token:
                 params["page_token"] = page_token

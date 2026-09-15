@@ -46,8 +46,8 @@ class UserChatsTestSuite(unittest.TestCase):
         models.add_chat(self.user["id"], "oc_added_001", "已归档群A")
 
         sample_chats = [
-            {"chat_id": "oc_added_001", "name": "已归档群A", "avatar": "http://img/1.png", "description": "群A描述"},
-            {"chat_id": "oc_other_002", "name": "技术研发核心组", "avatar": "http://img/2.png", "description": "技术交流"},
+            {"chat_id": "oc_added_001", "name": "已归档群A", "avatar": "http://img/1.png", "description": "群A描述", "owner_id": self.user["open_id"]},
+            {"chat_id": "oc_other_002", "name": "技术研发核心组", "avatar": "http://img/2.png", "description": "技术交流", "owner_id": "ou_someone_else"},
             {"chat_id": "oc_other_003", "name": "运营推广协同群", "avatar": "", "description": "运营交流"},
         ]
         models.save_user_chats_cache(self.user["id"], sample_chats)
@@ -55,11 +55,17 @@ class UserChatsTestSuite(unittest.TestCase):
         chats = models.get_user_chats_cache(self.user["id"])
         self.assertEqual(len(chats), 3)
 
-        # 校验 is_added 标记
+        # 校验基于创建时间倒序（后插入的排在前面）
+        self.assertEqual([c["chat_id"] for c in chats], ["oc_other_003", "oc_other_002", "oc_added_001"])
+
+        # 校验 is_added 与 is_owner 标记
         added_chat = next(c for c in chats if c["chat_id"] == "oc_added_001")
         self.assertTrue(added_chat["is_added"])
+        self.assertTrue(added_chat["is_owner"])
+
         other_chat = next(c for c in chats if c["chat_id"] == "oc_other_002")
         self.assertFalse(other_chat["is_added"])
+        self.assertFalse(other_chat["is_owner"])
 
         meta = models.get_user_chats_cache_last_updated(self.user["id"])
         self.assertEqual(meta["count"], 3)

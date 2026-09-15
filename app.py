@@ -1827,6 +1827,8 @@ INDEX_PAGE = r"""
         .item-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .item-name { font-size: 13.5px; font-weight: 500; color: #1f2329; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .item-name mark { background: #ffe066; color: inherit; padding: 0 1px; border-radius: 2px; }
+        .item-tags-wrap { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+        .item-tag-owner { font-size: 11px; color: #165dff; background: #e8f3ff; border: 1px solid #b3ccff; padding: 1px 6px; border-radius: 4px; flex-shrink: 0; font-weight: 600; }
         .item-tag-added { font-size: 11px; color: #86909c; background: #f2f3f5; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; font-weight: normal; }
         .item-tag-dissolved { font-size: 11px; color: #d46b08; background: #fff7e6; border: 1px solid #ffd591; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; font-weight: normal; }
         .item-sub-row { display: flex; align-items: center; gap: 8px; margin-top: 2px; font-size: 11.5px; color: #8f959e; }
@@ -2154,6 +2156,7 @@ INDEX_PAGE = r"""
                 });
                 const data = await resp.json();
                 if (data.ok) {
+                    showToast(enabled ? '已开启该群本地缓存' : '已关闭该群本地缓存', 'success');
                     const item = document.getElementById('chat-' + chatId);
                     const previewBtn = document.getElementById('preview-btn-' + chatId);
                     const hasCache = previewBtn && previewBtn.style.display !== 'none';
@@ -2721,10 +2724,12 @@ INDEX_PAGE = r"""
                     const total = data.total || 0;
                     const synced = data.synced || 0;
                     const pending = data.pending || 0;
+                    el.textContent = '已同步 ' + synced + ' / ' + total + ' 条' + (pending > 0 ? ' · 待同步 ' + pending + ' 条' : '');
                     const needCache = !!data.need_cache_backfill;
                     const item = document.getElementById('chat-' + chatId);
 
                     if (pending > 0) {
+                        updateChatStatus(chatId, 'pending', '待同步 ' + pending);
                         el.textContent = '已同步 ' + synced + ' / ' + total + ' 条 · 待同步 ' + pending + ' 条';
                         updateChatStatus(chatId, 'pending', '待同步 ' + pending + ' 条');
                         if (item) item.classList.remove('needs-cache');
@@ -3084,9 +3089,10 @@ INDEX_PAGE = r"""
                         : '<div class="item-avatar">' + escapeHtml((c.chat_name || '群').charAt(0).toUpperCase()) + '</div>';
                     const nameHtml = highlightMatch(c.chat_name || '未命名群聊', q);
                     const idHtml = highlightMatch(c.chat_id, q);
+                    const ownerHtml = c.is_owner ? '<span class="item-tag-owner" title="您是该群群主">👑 群主</span>' : '';
                     const addedHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
                     const dissolvedHtml = (c.chat_status === 'dissolved_save') ? '<span class="item-tag-dissolved" title="该群已解散，但飞书保留了历史消息，仍可归档">已解散(保留历史)</span>' : '';
-                    const tagHtml = addedHtml + dissolvedHtml;
+                    const tagHtml = (ownerHtml || addedHtml || dissolvedHtml) ? ('<div class="item-tags-wrap">' + ownerHtml + addedHtml + dissolvedHtml + '</div>') : '';
                     const descHtml = c.description ? '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;" title="' + escapeHtml(c.description) + '">' + escapeHtml(c.description) + '</span>' : '';
                     html += '<div class="dropdown-item' + (idx === activeDropdownIndex ? ' active' : '') + '" data-index="' + idx + '" onclick="handleItemClick(' + idx + ', event)">' +
                         avatarContent +
