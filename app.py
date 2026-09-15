@@ -203,10 +203,26 @@ def api_chat_stats(chat_id):
     # 待同步 = 群里消息总数 - 已同步到的位置
     pending = max(0, total - last_pos)
     latest_time_str = timestamp_to_datetime(latest_create_time, with_seconds=False) if latest_create_time else ""
+
+    chat_name = chat_config.get("chat_name") or chat_id
+    is_local_cache_enabled = bool(chat_config.get("local_cache", 0))
+    has_local_cache = local_cache.has_cache(chat_id, chat_name)
+    cached_pos = chat_config.get("last_cached_position", 0) or 0
+    if has_local_cache and cached_pos == 0:
+        file_pos = local_cache.get_last_cached_position_from_file(chat_id, chat_name)
+        if file_pos is not None:
+            cached_pos = file_pos
+        else:
+            cached_pos = last_pos
+    need_cache_backfill = is_local_cache_enabled and (not has_local_cache or cached_pos < last_pos) and (last_pos > 0 or total > 0)
+
     return jsonify({
         "total": total,
         "synced": synced,
         "pending": pending,
+        "need_cache_backfill": need_cache_backfill,
+        "has_cache": has_local_cache,
+        "local_cache": is_local_cache_enabled,
         "latest_message_time": latest_create_time,
         "latest_message_time_str": latest_time_str,
     })
@@ -2138,22 +2154,33 @@ INDEX_PAGE = r"""
                 });
                 const data = await resp.json();
                 if (data.ok) {
-                    showToast(enabled ? '已开启该群本地缓存' : '已关闭该群本地缓存', 'success');
                     const item = document.getElementById('chat-' + chatId);
                     const previewBtn = document.getElementById('preview-btn-' + chatId);
                     const hasCache = previewBtn && previewBtn.style.display !== 'none';
                     if (enabled) {
                         if (!hasCache) {
-                            showToast('已开启本地缓存，请点击「同步」开始生成归档', 'info');
-                            const btn = item ? item.querySelector('.btn-sync') : null;
-                            if (btn && !btn.disabled) {
-                                btn.classList.add('ready-pending');
+                            showToast('已开启本地缓存，已加入待同步队列', 'info');
+                            if (item) {
+                                item.classList.add('needs-cache');
+                                updateChatStatus(chatId, 'pending', '待生成缓存');
+                                const btn = item.querySelector('.btn-sync');
+                                if (btn && !btn.disabled) {
+                                    btn.classList.add('ready-pending');
+                                }
                             }
                         } else {
                             showToast('已开启该群本地缓存', 'success');
                         }
                     } else {
                         showToast('已关闭该群本地缓存', 'success');
+                        if (item) {
+                            item.classList.remove('needs-cache');
+                            const statsEl = item.querySelector('.stats');
+                            const isPending = statsEl && statsEl.textContent.includes('待同步');
+                            if (!isPending) {
+                                updateChatStatus(chatId, 'synced', '已同步满');
+                            }
+                        }
                     }
                 } else {
                     showToast(data.error || '切换失败', 'error');
@@ -2469,6 +2496,8 @@ INDEX_PAGE = r"""
 
             // 若已有本地缓存，实时显示预览按钮与下载 ZIP 链接
             if (result.has_cache) {
+                const item = document.getElementById('chat-' + chatId);
+                if (item) item.classList.remove('needs-cache');
                 const previewBtn = document.getElementById('preview-btn-' + chatId);
                 if (previewBtn) previewBtn.style.display = 'inline-flex';
                 const zipWrap = document.getElementById('zip-download-wrap-' + chatId);
@@ -2574,14 +2603,15 @@ INDEX_PAGE = r"""
             const btn = document.getElementById('btnSyncAll');
             if (btn && btn.disabled) return;
 
-            // 智能过滤：跳过已处于「已同步满」（.status-synced）状态的群聊，只同步有待更新或异常/待定群聊
+            // 智能过滤：跳过已处于「已同步满」（.status-synced）且不需要生成/补齐本地缓存的群聊
             const items = document.querySelectorAll('.chat-item');
             const toSyncIds = [];
             let alreadySyncedCount = 0;
             items.forEach(item => {
                 const cid = item.getAttribute('data-chat-id');
                 if (!cid) return;
-                if (item.classList.contains('status-synced')) {
+                const isFullySynced = item.classList.contains('status-synced') && !item.classList.contains('needs-cache');
+                if (isFullySynced) {
                     alreadySyncedCount++;
                 } else {
                     toSyncIds.push(cid);
@@ -2691,12 +2721,21 @@ INDEX_PAGE = r"""
                     const total = data.total || 0;
                     const synced = data.synced || 0;
                     const pending = data.pending || 0;
-                    el.textContent = '已同步 ' + synced + ' / ' + total + ' 条' + (pending > 0 ? ' · 待同步 ' + pending + ' 条' : '');
+                    const needCache = !!data.need_cache_backfill;
+                    const item = document.getElementById('chat-' + chatId);
+
                     if (pending > 0) {
-                        updateChatStatus(chatId, 'pending', '待同步 ' + pending);
+                        el.textContent = '已同步 ' + synced + ' / ' + total + ' 条 · 待同步 ' + pending + ' 条';
                         updateChatStatus(chatId, 'pending', '待同步 ' + pending + ' 条');
+                        if (item) item.classList.remove('needs-cache');
+                    } else if (needCache) {
+                        el.textContent = '已同步 ' + synced + ' / ' + total + ' 条 · 待生成本地缓存';
+                        updateChatStatus(chatId, 'pending', '待生成缓存');
+                        if (item) item.classList.add('needs-cache');
                     } else {
+                        el.textContent = '已同步 ' + synced + ' / ' + total + ' 条';
                         updateChatStatus(chatId, 'synced', '已同步满');
+                        if (item) item.classList.remove('needs-cache');
                     }
 
                     if (data.latest_message_time || data.latest_message_time_str) {
