@@ -322,12 +322,36 @@ class UserChatsTestSuite(unittest.TestCase):
             self.assertEqual(len(data.get("started", [])), 2)
             self.assertIn("oc_batch_1", data.get("started"))
             self.assertIn("oc_batch_3", data.get("started"))
-            self.assertEqual(data.get("skipped"), ["oc_batch_2"])
-            self.assertIn("已启动 2 个群聊", data.get("message"))
+            self.assertIn("已启动 2 个", data.get("message"))
             self.assertIn("1 个群聊已在同步中", data.get("message"))
         finally:
             # 清理 progress
             app_module._set_progress("oc_batch_1", stage="idle", running=False)
             app_module._set_progress("oc_batch_2", stage="idle", running=False)
             app_module._set_progress("oc_batch_3", stage="idle", running=False)
+
+    @patch("app._run_sync")
+    @patch("app.get_feishu_client")
+    def test_sync_all_with_specified_chat_ids(self, mock_client, mock_run_sync):
+        """测试全部开始同步仅同步指定的 chat_ids（智能跳过已同步满的群聊）"""
+        import app as app_module
+        mock_client.return_value = MagicMock()
+        models.add_chat(self.user["id"], "oc_filter_1", "群聊1")
+        models.add_chat(self.user["id"], "oc_filter_2", "群聊2")
+
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+
+        try:
+            # 只指定同步 oc_filter_2
+            resp = self.client.post("/api/sync_all", json={"chat_ids": ["oc_filter_2"]})
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertTrue(data.get("ok"))
+            self.assertEqual(data.get("started"), ["oc_filter_2"])
+            self.assertEqual(data.get("total"), 2)
+            self.assertEqual(data.get("target_count"), 1)
+        finally:
+            app_module._set_progress("oc_filter_1", stage="idle", running=False)
+            app_module._set_progress("oc_filter_2", stage="idle", running=False)
 

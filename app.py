@@ -570,7 +570,7 @@ def api_sync(chat_id):
 
 @app.route("/api/sync_all", methods=["POST"])
 def api_sync_all():
-    """批量启动当前用户所有已配置群聊的同步任务"""
+    """批量启动当前用户已配置群聊的同步任务（支持前端指定 chat_ids 过滤）"""
     user = get_current_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
@@ -583,9 +583,27 @@ def api_sync_all():
     if not chats:
         return jsonify({"error": "暂无可同步的群聊配置"}), 400
 
+    data = request.get_json(silent=True) or {}
+    target_ids = data.get("chat_ids")
+    if target_ids is not None:
+        target_set = set(target_ids)
+        chats_to_process = [c for c in chats if c["chat_id"] in target_set]
+    else:
+        chats_to_process = chats
+
+    if not chats_to_process:
+        return jsonify({
+            "ok": True,
+            "started": [],
+            "skipped": [],
+            "total": len(chats),
+            "target_count": 0,
+            "message": "当前没有需要同步的群聊",
+        })
+
     started = []
     skipped = []
-    for c in chats:
+    for c in chats_to_process:
         cid = c["chat_id"]
         progress = _get_progress(cid)
         if progress and progress.get("running"):
@@ -596,7 +614,7 @@ def api_sync_all():
         t.start()
         started.append(cid)
 
-    msg = f"已启动 {len(started)} 个群聊的同步任务"
+    msg = f"已启动 {len(started)} 个待同步群聊的任务"
     if skipped:
         msg += f"，{len(skipped)} 个群聊已在同步中（跳过）"
 
@@ -605,6 +623,7 @@ def api_sync_all():
         "started": started,
         "skipped": skipped,
         "total": len(chats),
+        "target_count": len(chats_to_process),
         "message": msg,
     })
 
@@ -1368,12 +1387,16 @@ INDEX_PAGE = r"""
         .add-chat button { padding: 10px 22px; background: #3370ff; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.2s; }
         .add-chat button:hover { background: #2860e1; }
         .chat-list { display: flex; flex-direction: column; gap: 12px; }
-        .chat-item { background: white; border-radius: 12px; padding: 18px 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; transition: box-shadow 0.2s; border-left: 4px solid transparent; }
-        .chat-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .chat-item { background: white; border-radius: 12px; padding: 18px 22px; border: 1px solid #dee0e3; border-left: 4px solid #dee0e3; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; transition: border-color 0.2s, box-shadow 0.2s; }
+        .chat-item:hover { border-color: #3370ff; box-shadow: 0 4px 16px rgba(51,112,255,0.12); }
         .chat-item.status-pending { border-left-color: #ff7d00; }
+        .chat-item.status-pending:hover { border-left-color: #ff7d00; }
         .chat-item.status-synced { border-left-color: #00b42a; }
+        .chat-item.status-synced:hover { border-left-color: #00b42a; }
         .chat-item.status-syncing { border-left-color: #3370ff; }
+        .chat-item.status-syncing:hover { border-left-color: #3370ff; }
         .chat-item.status-error { border-left-color: #f53f3f; }
+        .chat-item.status-error:hover { border-left-color: #f53f3f; }
         .chat-info { flex: 1; min-width: 0; }
         .chat-info .name { font-size: 15px; font-weight: 600; color: #1f2329; margin-bottom: 6px; }
         .chat-info .meta { font-size: 12px; color: #86909c; margin-bottom: 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -1405,6 +1428,7 @@ INDEX_PAGE = r"""
         .toast.success { background: #00b42a; }
         .toast.error { background: #f53f3f; }
         .toast.warn { background: #ff7d00; }
+        .toast.info { background: #3370ff; }
         .toast.show { opacity: 1; pointer-events: auto; }
         .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none; justify-content: center; align-items: center; z-index: 1000; pointer-events: none; }
         .modal-mask.show { display: flex; pointer-events: auto; }
@@ -1434,7 +1458,7 @@ INDEX_PAGE = r"""
         .sync-progress.done .bar { background: #00b42a; }
         /* 本地缓存增强样式 */
         .chat-item.is-clickable { cursor: pointer; }
-        .chat-item.is-clickable:hover { border-color: #b3ccff; box-shadow: 0 4px 16px rgba(51,112,255,0.08); }
+        .chat-item.is-clickable:hover { box-shadow: 0 4px 16px rgba(51,112,255,0.14); }
         .name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
         .preview-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #e8f3ff; color: #3370ff; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; }
         .preview-tag:hover { background: #3370ff; color: white; }
@@ -2019,15 +2043,43 @@ INDEX_PAGE = r"""
         async function syncAllChats() {
             const btn = document.getElementById('btnSyncAll');
             if (btn && btn.disabled) return;
+
+            // 智能过滤：跳过已处于「已同步满」（.status-synced）状态的群聊，只同步有待更新或异常/待定群聊
+            const items = document.querySelectorAll('.chat-item');
+            const toSyncIds = [];
+            let alreadySyncedCount = 0;
+            items.forEach(item => {
+                const cid = item.getAttribute('data-chat-id');
+                if (!cid) return;
+                if (item.classList.contains('status-synced')) {
+                    alreadySyncedCount++;
+                } else {
+                    toSyncIds.push(cid);
+                }
+            });
+
+            if (items.length > 0 && toSyncIds.length === 0) {
+                showToast('所有群聊均已处于「已同步满」最新状态，无需重复同步', 'info');
+                return;
+            }
+
             setSyncAllButtonState(true);
 
             try {
-                const resp = await fetch('/api/sync_all', { method: 'POST' });
+                const resp = await fetch('/api/sync_all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_ids: toSyncIds })
+                });
                 const data = await resp.json();
                 if (data.ok) {
-                    showToast(data.message || '已启动全部群聊同步', 'success');
+                    let tipMsg = data.message;
+                    if (alreadySyncedCount > 0 && data.started && data.started.length > 0) {
+                        tipMsg = '已启动 ' + data.started.length + ' 个待同步群聊（自动跳过 ' + alreadySyncedCount + ' 个已同步满群聊）';
+                    }
+                    showToast(tipMsg || '已启动群聊同步任务', 'success');
                     const startedSet = new Set(data.started || []);
-                    document.querySelectorAll('.chat-item').forEach(item => {
+                    items.forEach(item => {
                         const cid = item.getAttribute('data-chat-id');
                         if (cid && startedSet.has(cid)) {
                             const chatBtn = item.querySelector('.btn-sync');
@@ -2040,7 +2092,11 @@ INDEX_PAGE = r"""
                             startPolling(cid, chatBtn);
                         }
                     });
-                    monitorAllSyncProgress();
+                    if (data.started && data.started.length > 0) {
+                        monitorAllSyncProgress();
+                    } else {
+                        setSyncAllButtonState(false);
+                    }
                 } else {
                     showToast(data.error || '全部同步启动失败', 'error');
                     setSyncAllButtonState(false);
