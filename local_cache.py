@@ -419,6 +419,7 @@ def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skip
         notes_str = " ".join(skipped_notes)
         content_md += f"\n\n> ⚠️ *{notes_str}*"
 
+    # 规范组合单条消息块
     # 规范组合单条消息块，并在块首内嵌位置与 ID 注释（HTML 注释在渲染时完全隐藏，但可用于断点续传/自愈）
     header_speaker = f"**{speaker_name}**" if speaker_name else "**未知发言人**"
     pos = int(msg.get("message_position") or 0)
@@ -426,8 +427,10 @@ def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skip
     pos_meta = f"<!-- msg_pos:{pos} msg_id:{mid} -->\n" if pos else ""
 
     if msg_type == "system":
+        block = f"*系统消息 · {date_str}*\n\n{content_md}\n\n---\n"
         block = f"{pos_meta}*系统消息 · {date_str}*\n\n{content_md}\n\n---\n"
     else:
+        block = f"{header_speaker} &nbsp; `{date_str}`\n\n{content_md}\n\n---\n"
         block = f"{pos_meta}{header_speaker} &nbsp; `{date_str}`\n\n{content_md}\n\n---\n"
 
     return block
