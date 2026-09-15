@@ -1512,10 +1512,22 @@ INDEX_PAGE = r"""
         .add-chat button { padding: 10px 22px; background: #3370ff; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.2s; }
         .add-chat button:hover { background: #2860e1; }
         .chat-list { display: flex; flex-direction: column; gap: 12px; }
-        .chat-item { background: white; border-radius: 12px; padding: 18px 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; transition: box-shadow 0.2s; border-left: 4px solid transparent; }
-        .chat-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
-        .chat-item { background: white; border-radius: 12px; padding: 18px 22px; border: 1px solid #dee0e3; border-left: 4px solid #dee0e3; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; transition: border-color 0.2s, box-shadow 0.2s; }
-        .chat-item:hover { border-color: #3370ff; box-shadow: 0 4px 16px rgba(51,112,255,0.12); }
+        .chat-item {
+            background: white;
+            border-radius: 12px;
+            padding: 16px 20px;
+            border: 1px solid #dee0e3;
+            border-left: 4px solid #dee0e3;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .chat-item:hover {
+            border-color: #b3ccff;
+            box-shadow: 0 4px 16px rgba(51,112,255,0.1);
+        }
         .chat-item.status-pending { border-left-color: #ff7d00; }
         .chat-item.status-pending:hover { border-left-color: #ff7d00; }
         .chat-item.status-synced { border-left-color: #00b42a; }
@@ -1524,32 +1536,55 @@ INDEX_PAGE = r"""
         .chat-item.status-syncing:hover { border-left-color: #3370ff; }
         .chat-item.status-error { border-left-color: #f53f3f; }
         .chat-item.status-error:hover { border-left-color: #f53f3f; }
-        .chat-info { flex: 1; min-width: 0; }
-        .chat-info .name { font-size: 15px; font-weight: 600; color: #1f2329; margin-bottom: 6px; }
-        .chat-info .meta { font-size: 12px; color: #86909c; margin-bottom: 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-        .chat-info .meta .id { font-family: 'SF Mono', Consolas, monospace; background: #f2f3f5; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
-        .chat-info .meta .feishu-tag { background: #e8f3ff; color: #3370ff; padding: 2px 8px; border-radius: 4px; font-size: 11px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .chat-info .meta a { color: #3370ff; text-decoration: none; font-size: 12px; }
-        .chat-info .meta a:hover { text-decoration: underline; }
-        .chat-info .meta .dot { color: #c9cdd4; }
-        .stats-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
-        .stats { font-size: 12px; color: #86909c; }
-        .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
-        .badge-pending { background: #fff7e8; color: #ff7d00; }
-        .badge-synced { background: #e8ffea; color: #00b42a; }
-        .badge-syncing { background: #e8f3ff; color: #3370ff; }
-        .badge-error { background: #ffece8; color: #f53f3f; }
-        .badge .dot-icon { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-        .badge-syncing .dot-icon { animation: pulse 1.2s infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-        .chat-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
-        .btn-sync { padding: 8px 18px; background: #00b42a; color: white; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+
+        /* 卡片头部：群名、状态Badge与核心操作 */
+        .card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .card-title-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; flex: 1; }
+        .card-title-group .name { font-size: 15px; font-weight: 600; color: #1f2329; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+        .feishu-origin-tag { background: #f2f3f5; color: #646a73; padding: 2px 8px; border-radius: 4px; font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .card-primary-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        .btn-preview-tag { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px; border-radius: 8px; font-size: 12px; background: #e8f3ff; color: #3370ff; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; border: 1px solid rgba(51, 112, 255, 0.2); }
+        .btn-preview-tag:hover { background: #3370ff; color: white; border-color: #3370ff; }
+        .btn-sync { padding: 6px 16px; background: #00b42a; color: white; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
         .btn-sync:hover { background: #009a25; }
         .btn-sync:disabled { background: #c9cdd4; cursor: not-allowed; }
         .btn-sync.ready-pending { background: #ff7d00; }
         .btn-sync.ready-pending:hover { background: #e66e00; }
-        .btn-delete { padding: 8px 14px; background: white; color: #f53f3f; border: 1px solid #ffd6d0; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
-        .btn-delete:hover { background: #ffece8; }
+
+        /* 卡片中部：关键指标条 */
+        .card-metrics { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #646a73; background: #f8f9fa; padding: 6px 12px; border-radius: 6px; }
+        .metric-item { display: inline-flex; align-items: center; gap: 4px; }
+        .metric-label { color: #8f959e; }
+        .metric-val { color: #1f2329; font-weight: 500; }
+        .metric-val.mono { font-family: 'SF Mono', Consolas, monospace; font-size: 11px; color: #4e5969; }
+        .id-metric { cursor: pointer; border-radius: 4px; padding: 1px 4px; transition: background 0.15s, color 0.15s; }
+        .id-metric:hover { background: #e5e6eb; color: #3370ff; }
+        .id-metric .copy-icon { font-size: 11px; opacity: 0.6; }
+        .id-metric:hover .copy-icon { opacity: 1; }
+        .metric-sep { color: #c9cdd4; }
+
+        /* 卡片底部：辅助工具与资源外链 */
+        .card-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 2px; }
+        .footer-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+        .footer-dot { color: #d8dde3; }
+        .footer-link { color: #3370ff; text-decoration: none; font-size: 12px; font-weight: 500; }
+        .footer-link:hover { text-decoration: underline; }
+        .cache-toggle-wrap { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #4e5969; cursor: pointer; user-select: none; background: #f2f3f5; padding: 2px 8px; border-radius: 6px; transition: background 0.2s; }
+        .cache-toggle-wrap:hover { background: #e5e6eb; }
+        .cache-toggle-wrap input { cursor: pointer; margin: 0; }
+        .btn-delete-clean { padding: 4px 10px; background: transparent; color: #8f959e; border: 1px solid transparent; border-radius: 6px; font-size: 12px; cursor: pointer; transition: all 0.2s; }
+        .btn-delete-clean:hover { background: #ffece8; color: #f53f3f; border-color: #ffd6d0; }
+
+        /* 状态徽章 */
+        .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+        .badge-pending { background: #fff7e8; color: #ff7d00; }
+        .badge-synced { background: #e8ffea; color: #00b42a; }
+        .badge-syncing { background: #e8f3ff; color: #3370ff; }
+        .badge-error { background: #ffece8; color: #f53f3f; }
+        .badge .dot-icon { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+        .badge-syncing .dot-icon { animation: pulse 1.2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
         .empty { text-align: center; padding: 56px; color: #86909c; background: white; border-radius: 12px; }
         .toast { position: fixed; top: 20px; right: 20px; padding: 12px 22px; border-radius: 8px; color: white; font-size: 14px; z-index: 999; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 400px; }
         .toast.success { background: #00b42a; }
@@ -1577,24 +1612,12 @@ INDEX_PAGE = r"""
         .delete-cache-label.disabled input[type="checkbox"] { cursor: not-allowed; }
         .delete-cache-tip { font-size: 12px; color: #86909c; margin-top: 5px; padding-left: 24px; line-height: 1.4; }
         /* 同步进度条 */
-        .sync-progress { margin-top: 10px; display: none; }
+        .sync-progress { margin-top: 6px; display: none; }
         .sync-progress .stage { font-size: 12px; color: #4e5969; margin-bottom: 6px; line-height: 1.4; }
         .sync-progress .bar-wrap { width: 100%; height: 6px; background: #f2f3f5; border-radius: 3px; overflow: hidden; }
         .sync-progress .bar { height: 100%; background: linear-gradient(90deg, #3370ff, #00b42a); border-radius: 3px; width: 0%; transition: width 0.3s; }
         .sync-progress.error .bar { background: #f53f3f; }
         .sync-progress.done .bar { background: #00b42a; }
-        /* 本地缓存增强样式 */
-        .chat-item.is-clickable { cursor: pointer; }
-        .chat-item.is-clickable:hover { border-color: #b3ccff; box-shadow: 0 4px 16px rgba(51,112,255,0.08); }
-        .chat-item.is-clickable:hover { box-shadow: 0 4px 16px rgba(51,112,255,0.14); }
-        .name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
-        .preview-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #e8f3ff; color: #3370ff; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; }
-        .preview-tag:hover { background: #3370ff; color: white; }
-        .link-cache { color: #3370ff; text-decoration: none; font-size: 12px; font-weight: 500; }
-        .link-cache:hover { text-decoration: underline; }
-        .cache-toggle-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #4e5969; cursor: pointer; user-select: none; background: #f2f3f5; padding: 3px 9px; border-radius: 6px; transition: background 0.2s; }
-        .cache-toggle-wrap:hover { background: #e5e6eb; }
-        .cache-toggle-wrap input { cursor: pointer; margin: 0; }
         .checkbox-row { margin-top: 12px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4e5969; }
         .checkbox-row input { cursor: pointer; width: 15px; height: 15px; }
         /* 列表头部与搜索框 */
@@ -1736,41 +1759,61 @@ INDEX_PAGE = r"""
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
-                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
-                    <div class="chat-info" {% if chat.has_cache %}onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览"{% endif %}>
-                        <div class="name-row">
-                            <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
-                            {% if chat.has_cache %}
-                            <span class="preview-tag" onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览">📑 预览归档</span>
+                <div class="chat-item" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
+                    <div class="card-header">
+                        <div class="card-title-group">
+                            <div class="name" title="{{ chat.chat_name or chat.chat_id }}">{{ chat.chat_name or chat.chat_id }}</div>
+                            <span class="badge" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text"></span></span>
+                            {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}
+                            <span class="feishu-origin-tag feishu-tag" title="飞书真实群名: {{ chat.feishu_name }}">原名: {{ chat.feishu_name }}</span>
                             {% endif %}
                         </div>
-                        <div class="meta" id="meta-{{ chat.chat_id }}">
-                            {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}<span class="feishu-tag" title="飞书真实群名">{{ chat.feishu_name }}</span>{% endif %}
-                            <span class="id">{{ chat.chat_id }}</span>
-                            {% if chat.record_count %}<span class="dot">·</span><span>已同步 <span class="record-count">{{ chat.record_count }}</span> 条</span>{% endif %}
-                            {% if chat.base_url %}<span class="dot">·</span><a href="{{ chat.base_url }}" target="_blank" onclick="event.stopPropagation()">查看表格</a>{% endif %}
-                            {% if chat.has_cache %}
-                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/view" target="_blank" onclick="event.stopPropagation()" class="link-cache">在线预览</a>
-                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/download" onclick="event.stopPropagation()" class="link-cache">下载ZIP</a>
-                            {% endif %}
-                            <span class="latest-time-wrap" id="latest-time-wrap-{{ chat.chat_id }}" {% if not chat.latest_message_time_str %}style="display:none;"{% endif %}><span class="dot">·</span><span class="latest-time-text" id="latest-time-{{ chat.chat_id }}" title="群聊最新一条消息发送时间">最新消息: {{ chat.latest_message_time_str }}</span></span>
+                        <div class="card-primary-actions">
+                            <a href="/cache/{{ chat.chat_id }}/view" target="_blank" class="btn-preview-tag" id="preview-btn-{{ chat.chat_id }}" {% if not chat.has_cache %}style="display:none;"{% endif %} title="点击在新标签页查看本地 Markdown 归档与附件">📑 预览归档</a>
+                            <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
                         </div>
-                        <div class="stats-row">
-                            <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
-                            <span class="badge badge-syncing" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text">同步中</span></span>
-                            <label class="cache-toggle-wrap" onclick="event.stopPropagation()" title="开启后，同步时自动保存 Markdown 记录并下载图片和附件">
+                    </div>
+                    <div class="card-metrics">
+                        <div class="metric-item id-metric" title="点击复制完整群 ID" onclick="copyChatId('{{ chat.chat_id }}', event)">
+                            <span class="metric-label">ID:</span>
+                            <span class="metric-val mono">{{ chat.chat_id }}</span>
+                            <span class="copy-icon">📋</span>
+                        </div>
+                        <span class="metric-sep" id="latest-time-sep-{{ chat.chat_id }}" {% if not chat.latest_message_time_str %}style="display:none;"{% endif %}>·</span>
+                        <div class="metric-item" id="latest-time-wrap-{{ chat.chat_id }}" {% if not chat.latest_message_time_str %}style="display:none;"{% endif %}>
+                            <span class="metric-label">最新消息:</span>
+                            <span class="metric-val latest-time-val" id="latest-time-{{ chat.chat_id }}" title="群聊最新一条消息发送时间">{{ chat.latest_message_time_str }}</span>
+                        </div>
+                        <span class="metric-sep">·</span>
+                        <div class="metric-item">
+                            <span class="metric-label">进度:</span>
+                            <span class="metric-val stats" data-chat-id="{{ chat.chat_id }}">
+                                {% if chat.record_count %}已同步 {{ chat.record_count }} 条 · 查询中...{% else %}查询中...{% endif %}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <div class="footer-left">
+                            <label class="cache-toggle-wrap" title="开启后，同步时自动保存 Markdown 记录并下载图片和附件">
                                 <input type="checkbox" id="toggle-{{ chat.chat_id }}" onchange="toggleLocalCache('{{ chat.chat_id }}', this.checked)" {% if chat.local_cache %}checked{% endif %}>
                                 <span>本地缓存</span>
                             </label>
+                            {% if chat.base_url %}
+                            <span class="footer-dot">·</span>
+                            <a href="{{ chat.base_url }}" target="_blank" class="footer-link">飞书表格 ↗</a>
+                            {% endif %}
+                            <span id="zip-download-wrap-{{ chat.chat_id }}" {% if not chat.has_cache %}style="display:none;"{% endif %}>
+                                <span class="footer-dot">·</span>
+                                <a href="/cache/{{ chat.chat_id }}/download" class="footer-link">下载 ZIP ⬇</a>
+                            </span>
                         </div>
-                        <div class="sync-progress" id="progress-{{ chat.chat_id }}">
-                            <div class="stage">准备中...</div>
-                            <div class="bar-wrap"><div class="bar"></div></div>
+                        <div class="footer-right">
+                            <button class="btn-delete-clean" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                         </div>
                     </div>
-                    <div class="chat-actions" onclick="event.stopPropagation()">
-                        <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
-                        <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
+                    <div class="sync-progress" id="progress-{{ chat.chat_id }}">
+                        <div class="stage">准备中...</div>
+                        <div class="bar-wrap"><div class="bar"></div></div>
                     </div>
                 </div>
                 {% endfor %}
@@ -1818,6 +1861,74 @@ INDEX_PAGE = r"""
         function openCacheView(chatId, e) {
             if (e) e.stopPropagation();
             window.location.href = '/cache/' + chatId + '/view';
+        }
+
+        // 将 SQLite UTC 时间格式转换为浏览器本机时区展示
+        function formatUtcToLocal(utcStr) {
+            if (!utcStr) return '';
+            try {
+                const iso = utcStr.includes('T') ? (utcStr.endsWith('Z') ? utcStr : utcStr + 'Z') : (utcStr.replace(' ', 'T') + 'Z');
+                const d = new Date(iso);
+                if (isNaN(d.getTime())) return '';
+                const m = d.getMonth() + 1;
+                const day = d.getDate();
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mm = String(d.getMinutes()).padStart(2, '0');
+                return `${m}月${day}日 ${hh}:${mm}`;
+            } catch(e) {
+                return '';
+            }
+        }
+
+        // 将毫秒级时间戳转换为浏览器本机时区展示
+        function formatEpochToLocal(ms) {
+            if (!ms) return '';
+            try {
+                let ts = parseInt(ms, 10);
+                if (isNaN(ts) || ts <= 0) return '';
+                if (ts < 1e11) ts = ts * 1000;
+                const d = new Date(ts);
+                if (isNaN(d.getTime())) return '';
+                const m = d.getMonth() + 1;
+                const day = d.getDate();
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mm = String(d.getMinutes()).padStart(2, '0');
+                return `${m}月${day}日 ${hh}:${mm}`;
+            } catch(e) {
+                return '';
+            }
+        }
+
+        // 点击复制群聊 ID 并弹出轻量提示
+        function copyChatId(chatId, event) {
+            if (event) event.stopPropagation();
+            if (!chatId) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(chatId).then(() => {
+                    showToast('已复制群 ID: ' + chatId, 'info');
+                }).catch(() => {
+                    fallbackCopy(chatId);
+                });
+            } else {
+                fallbackCopy(chatId);
+            }
+        }
+
+        function fallbackCopy(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            try {
+                document.execCommand('copy');
+                showToast('已复制群 ID: ' + text, 'info');
+            } catch(e) {
+                showToast('复制失败，请手动复制', 'warn');
+            }
+            document.body.removeChild(ta);
         }
 
         function filterChats() {
@@ -2026,27 +2137,9 @@ INDEX_PAGE = r"""
             }, 800);
         }
 
-        // 同步完成后直接更新 meta 行：已同步条数 + 飞书表格链接
+        // 同步完成后更新卡片数据：同步条数 + 状态 + 预览与下载按钮
         function updateMetaAfterSync(chatId, result) {
-            const meta = document.getElementById('meta-' + chatId);
-            if (!meta) return;
-            // 更新已同步条数
-            let countSpan = meta.querySelector('.record-count');
-            if (countSpan) {
-                countSpan.textContent = result.total_records || 0;
-            } else if (result.total_records) {
-                // 之前没有 record_count，追加（新格式：· 已同步 N 条）
-                const cnt = document.createElement('span');
-                cnt.innerHTML = '<span class="dot">·</span><span>已同步 <span class="record-count">' + result.total_records + '</span> 条</span>';
-                meta.appendChild(cnt);
-            }
-            // 追加查看表格链接（如不存在）
-            if (result.base_url && !meta.querySelector('a[href="' + result.base_url + '"]')) {
-                const link = document.createElement('span');
-                link.innerHTML = '<span class="dot">·</span><a href="' + result.base_url + '" target="_blank">查看表格</a>';
-                meta.appendChild(link);
-            }
-            // 同时刷新 stats 里的待同步条数（待同步应变为 0）
+            // 刷新 stats 里的进度条数
             const statsEl = document.querySelector('.stats[data-chat-id="' + chatId + '"]');
             if (statsEl) {
                 const total = result.total_records || 0;
@@ -2055,34 +2148,15 @@ INDEX_PAGE = r"""
                 statsEl.textContent = '已同步 ' + total + ' / ' + totalInStats + ' 条';
             }
 
-            // 若已有本地缓存，实时给卡片赋予预览交互及快捷链接
+            // 更新状态为已同步满
+            updateChatStatus(chatId, 'synced', '已同步满');
+
+            // 若已有本地缓存，实时显示预览按钮与下载 ZIP 链接
             if (result.has_cache) {
-                const item = document.getElementById('chat-' + chatId);
-                if (item) {
-                    if (!item.classList.contains('is-clickable')) {
-                        item.classList.add('is-clickable');
-                        const infoEl = item.querySelector('.chat-info');
-                        if (infoEl) {
-                            infoEl.setAttribute('onclick', "openCacheView('" + chatId + "', event)");
-                            infoEl.title = '点击进入 Markdown 预览';
-                        }
-                    }
-                    const nameRow = item.querySelector('.name-row');
-                    if (nameRow && !nameRow.querySelector('.preview-tag')) {
-                        const tag = document.createElement('span');
-                        tag.className = 'preview-tag';
-                        tag.textContent = '📑 预览归档';
-                        tag.title = '点击进入 Markdown 预览';
-                        tag.onclick = (e) => openCacheView(chatId, e);
-                        nameRow.appendChild(tag);
-                    }
-                    if (!meta.querySelector('.link-cache')) {
-                        const cLink = document.createElement('span');
-                        cLink.innerHTML = '<span class="dot">·</span><a href="/cache/' + chatId + '/view" target="_blank" class="link-cache" onclick="event.stopPropagation()">在线预览</a>' +
-                                          '<span class="dot">·</span><a href="/cache/' + chatId + '/download" class="link-cache" onclick="event.stopPropagation()">下载ZIP</a>';
-                        meta.appendChild(cLink);
-                    }
-                }
+                const previewBtn = document.getElementById('preview-btn-' + chatId);
+                if (previewBtn) previewBtn.style.display = 'inline-flex';
+                const zipWrap = document.getElementById('zip-download-wrap-' + chatId);
+                if (zipWrap) zipWrap.style.display = 'inline';
             }
         }
 
@@ -2255,6 +2329,19 @@ INDEX_PAGE = r"""
 
         // 页面加载后实时查询每个群的待同步条数与最新消息时间
         document.addEventListener('DOMContentLoaded', () => {
+            // 页面加载初期将服务端传过来的时间戳快速转成本地时间展示
+            document.querySelectorAll('.chat-item').forEach(item => {
+                const cid = item.getAttribute('data-chat-id');
+                const t = parseInt(item.dataset.latestTime || '0', 10);
+                if (cid && t > 0) {
+                    const text = document.getElementById('latest-time-' + cid);
+                    const formatted = formatEpochToLocal(t);
+                    if (text && formatted) {
+                        text.textContent = formatted;
+                    }
+                }
+            });
+
             const statElements = Array.from(document.querySelectorAll('.stats'));
             const statTasks = statElements.map(async (el) => {
                 const chatId = el.dataset.chatId;
@@ -2279,18 +2366,21 @@ INDEX_PAGE = r"""
                     const pending = data.pending || 0;
                     el.textContent = '已同步 ' + synced + ' / ' + total + ' 条' + (pending > 0 ? ' · 待同步 ' + pending + ' 条' : '');
                     if (pending > 0) {
-                        updateChatStatus(chatId, 'pending', '待同步 ' + pending);
+                        updateChatStatus(chatId, 'pending', '待同步 ' + pending + ' 条');
                     } else {
                         updateChatStatus(chatId, 'synced', '已同步满');
                     }
 
-                    if (data.latest_message_time_str) {
+                    if (data.latest_message_time || data.latest_message_time_str) {
                         const wrap = document.getElementById('latest-time-wrap-' + chatId);
                         const text = document.getElementById('latest-time-' + chatId);
-                        if (wrap && text) {
-                            text.textContent = '最新消息: ' + data.latest_message_time_str;
-                            wrap.style.display = 'inline';
+                        const sep = document.getElementById('latest-time-sep-' + chatId);
+                        const formatted = formatEpochToLocal(data.latest_message_time) || data.latest_message_time_str;
+                        if (wrap && text && formatted) {
+                            text.textContent = formatted;
+                            wrap.style.display = 'inline-flex';
                         }
+                        if (sep && formatted) sep.style.display = 'inline';
                         const item = document.getElementById('chat-' + chatId);
                         if (item && data.latest_message_time) {
                             item.dataset.latestTime = data.latest_message_time;
@@ -2493,15 +2583,8 @@ INDEX_PAGE = r"""
             if (count === 0) {
                 tipEl.textContent = '暂无已缓存群聊';
             } else {
-                let timeStr = '';
-                if (lastUpdated) {
-                    try {
-                        const parts = lastUpdated.split(/[- :]/);
-                        if (parts.length >= 5) {
-                            timeStr = ' · ' + parseInt(parts[1]) + '月' + parseInt(parts[2]) + '日 ' + parts[3] + ':' + parts[4];
-                        }
-                    } catch(e) {}
-                }
+                const formattedTime = formatUtcToLocal(lastUpdated);
+                const timeStr = formattedTime ? (' · ' + formattedTime) : '';
                 tipEl.textContent = '已缓存 ' + count + ' 个群聊' + timeStr;
             }
         }
