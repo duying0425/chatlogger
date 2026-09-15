@@ -220,6 +220,14 @@ class FeishuClient:
         """
         result = {}
         try:
+            params = {"member_id_type": "open_id", "page_size": 100}
+            data = self._api_get(f"/im/v1/chats/{chat_id}/members", params=params)
+            if data.get("code") == 0:
+                for m in data.get("data", {}).get("items", []):
+                    oid = m.get("member_id", "")
+                    name = m.get("name", "")
+                    if oid and name:
+                        result[oid] = name
             page_token = None
             while True:
                 params = {"member_id_type": "open_id", "page_size": 100}

@@ -499,7 +499,7 @@ def api_delete_chat(chat_id):
 
 # ===== 本地缓存预览与资源路由 =====
 
-def _auto_heal_markdown_speakers(chat_id, chat_name, raw_md=None):
+def _auto_heal_markdown_speakers(chat_id, chat_name, raw_md=None, client=None):
     """检测 Markdown 中残留的未解析 **ou_xxx** 发言人，批量通过飞书通讯录解析并就地自愈修复"""
     if raw_md is None:
         raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
@@ -508,7 +508,11 @@ def _auto_heal_markdown_speakers(chat_id, chat_name, raw_md=None):
     unresolved_ids = list(set(re.findall(r"\*\*(ou_[0-9a-fA-F]+)\*\*", raw_md)))
     if not unresolved_ids:
         return raw_md
-    client = get_feishu_client()
+    if client is None:
+        try:
+            client = get_feishu_client()
+        except Exception:
+            client = None
     if client:
         try:
             name_map = client.get_users_batch(unresolved_ids)
@@ -531,6 +535,7 @@ def cache_view(chat_id):
         return "群聊未配置", 404
 
     chat_name = chat_config.get("chat_name") or chat_id
+    raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
     raw_md = _auto_heal_markdown_speakers(chat_id, chat_name)
     info = local_cache.get_cache_info(chat_id, chat_name)
 
@@ -557,6 +562,7 @@ def cache_raw(chat_id):
         return "群聊未配置", 404
 
     chat_name = chat_config.get("chat_name") or chat_id
+    raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
     raw_md = _auto_heal_markdown_speakers(chat_id, chat_name)
     if raw_md is None:
         return "尚未生成本地缓存", 404
