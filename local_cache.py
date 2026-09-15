@@ -77,6 +77,78 @@ def init_chat_cache(chat_id, chat_name=None):
     return md_path
 
 
+def ensure_chat_header(chat_id, chat_name=None):
+    """确保 Markdown 文件存在头部。若已存在但原标题为 chat_id 且现在有了真实群名，则平滑更新头部标题。"""
+    md_path = get_chat_md_path(chat_id, chat_name)
+    if not os.path.exists(md_path) or os.path.getsize(md_path) == 0:
+        return init_chat_cache(chat_id, chat_name)
+
+    if not chat_name or chat_name == chat_id:
+        return md_path
+
+    try:
+        with open(md_path, "r", encoding="utf-8") as f:
+            content = f.read(2048)  # 只读前 2KB 检查头部
+
+        old_title = f"# {chat_id} - 聊天记录归档"
+        new_title = f"# {chat_name} - 聊天记录归档"
+        old_meta = f"> - **群聊名称**: {chat_id}"
+        new_meta = f"> - **群聊名称**: {chat_name}"
+
+        if old_title in content or old_meta in content:
+            with open(md_path, "r", encoding="utf-8") as f:
+                full_content = f.read()
+            full_content = full_content.replace(old_title, new_title, 1).replace(old_meta, new_meta, 1)
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(full_content)
+    except Exception as e:
+        print(f"[local_cache] 更新群聊归档头部失败: {e}")
+
+    return md_path
+
+
+def find_existing_asset(chat_id, chat_name, filename, file_key=""):
+    """在 assets/ 目录中查找是否已下载过该附件/图片。
+    如果存在且文件大小 > 0，直接返回相对路径 'assets/{filename}'，避免重复下载。
+    """
+    chat_dir = get_chat_cache_dir(chat_id, chat_name)
+    assets_dir = os.path.join(chat_dir, "assets")
+    if not os.path.exists(assets_dir):
+        return None
+
+    safe_name = sanitize_filename(filename, fallback="")
+    candidates = []
+    if safe_name:
+        candidates.append(safe_name)
+    if file_key:
+        safe_key = sanitize_filename(file_key)
+        candidates.append(safe_key)
+        ext = os.path.splitext(filename)[1] if filename else ""
+        if ext:
+            candidates.append(f"{safe_key}{ext}")
+
+    try:
+        existing_files = set(os.listdir(assets_dir))
+    except Exception:
+        return None
+
+    for c in candidates:
+        if c in existing_files:
+            target_path = os.path.join(assets_dir, c)
+            if os.path.getsize(target_path) > 0:
+                return f"assets/{c}"
+
+    # 按 file_key 子串查找（兼容 img_v3_...jpg 等情况）
+    if file_key:
+        for f in existing_files:
+            if file_key in f:
+                target_path = os.path.join(assets_dir, f)
+                if os.path.getsize(target_path) > 0:
+                    return f"assets/{f}"
+
+    return None
+
+
 def save_asset(chat_id, chat_name, file_content, filename, file_key=""):
     """保存图片或附件到 cache/{chat}/assets/ 目录。
     返回在 Markdown 中使用的相对路径，如: assets/unique_file.jpg
@@ -347,14 +419,41 @@ def format_message_to_markdown(msg, speaker_name, date_str, asset_map=None, skip
         notes_str = " ".join(skipped_notes)
         content_md += f"\n\n> ⚠️ *{notes_str}*"
 
-    # 规范组合单条消息块
+    # 规范组合单条消息块，并在块首内嵌位置与 ID 注释（HTML 注释在渲染时完全隐藏，但可用于断点续传/自愈）
     header_speaker = f"**{speaker_name}**" if speaker_name else "**未知发言人**"
+    pos = int(msg.get("message_position") or 0)
+    mid = msg.get("message_id") or ""
+    pos_meta = f"<!-- msg_pos:{pos} msg_id:{mid} -->\n" if pos else ""
+
     if msg_type == "system":
-        block = f"*系统消息 · {date_str}*\n\n{content_md}\n\n---\n"
+        block = f"{pos_meta}*系统消息 · {date_str}*\n\n{content_md}\n\n---\n"
     else:
-        block = f"{header_speaker} &nbsp; `{date_str}`\n\n{content_md}\n\n---\n"
+        block = f"{pos_meta}{header_speaker} &nbsp; `{date_str}`\n\n{content_md}\n\n---\n"
 
     return block
+
+
+def get_last_cached_position_from_file(chat_id, chat_name=None):
+    """从本地 Markdown 文件末尾快速提取已归档的最后一条消息 position。
+    文件不存在或未找到匹配注释时返回 None。
+    """
+    md_path = get_chat_md_path(chat_id, chat_name)
+    if not os.path.exists(md_path) or os.path.getsize(md_path) == 0:
+        return None
+
+    try:
+        size = os.path.getsize(md_path)
+        read_size = min(size, 32768)  # 读末尾 32KB
+        with open(md_path, "rb") as f:
+            if size > read_size:
+                f.seek(size - read_size)
+            chunk = f.read().decode("utf-8", errors="ignore")
+        matches = re.findall(r"<!--\s*msg_pos:(\d+)", chunk)
+        if matches:
+            return int(matches[-1])
+    except Exception as e:
+        print(f"[local_cache] 从文件读取最后 cached position 失败: {e}")
+    return None
 
 
 def append_messages_to_cache(chat_id, chat_name, formatted_blocks):

@@ -322,6 +322,8 @@ class UserChatsTestSuite(unittest.TestCase):
             self.assertEqual(len(data.get("started", [])), 2)
             self.assertIn("oc_batch_1", data.get("started"))
             self.assertIn("oc_batch_3", data.get("started"))
+            self.assertEqual(data.get("skipped"), ["oc_batch_2"])
+            self.assertIn("已启动 2 个群聊", data.get("message"))
             self.assertIn("已启动 2 个", data.get("message"))
             self.assertIn("1 个群聊已在同步中", data.get("message"))
         finally:

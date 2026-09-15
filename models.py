@@ -63,6 +63,18 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # 迁移：本地缓存已归档的最大消息位置
+    try:
+        c.execute("ALTER TABLE chats ADD COLUMN last_cached_position INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    # 迁移：群聊最新一条消息的发送时间戳（毫秒）
+    try:
+        c.execute("ALTER TABLE chats ADD COLUMN latest_message_time INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     # 用户群聊信息缓存表：缓存该用户在飞书加入的所有群聊
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_chats_cache (
@@ -137,7 +149,7 @@ def update_user_name(user_id, name):
 def get_chats(user_id):
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC, id DESC", (user_id,)
+        "SELECT * FROM chats WHERE user_id = ? ORDER BY COALESCE(latest_message_time, 0) DESC, updated_at DESC, id DESC", (user_id,)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -209,6 +221,26 @@ def update_chat_sync_status(user_id, chat_id, last_position, record_count):
     conn.execute(
         "UPDATE chats SET last_synced_position = ?, record_count = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND chat_id = ?",
         (last_position, record_count, user_id, chat_id)
+    )
+    conn.commit()
+    conn.close()
+
+def update_chat_last_cached_position(user_id, chat_id, last_cached_position):
+    conn = get_db()
+    conn.execute(
+        "UPDATE chats SET last_cached_position = ? WHERE user_id = ? AND chat_id = ?",
+        (last_cached_position, user_id, chat_id)
+    )
+    conn.commit()
+    conn.close()
+
+def update_chat_latest_message_time(user_id, chat_id, latest_message_time):
+    if not latest_message_time:
+        return
+    conn = get_db()
+    conn.execute(
+        "UPDATE chats SET latest_message_time = ? WHERE user_id = ? AND chat_id = ? AND (latest_message_time IS NULL OR latest_message_time < ?)",
+        (latest_message_time, user_id, chat_id, latest_message_time)
     )
     conn.commit()
     conn.close()

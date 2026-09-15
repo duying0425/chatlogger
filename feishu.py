@@ -249,13 +249,21 @@ class FeishuClient:
             raise Exception(f"获取消息失败: {data}")
         return data["data"]
 
-    def get_chat_message_count(self, chat_id):
-        """获取群消息总数（取按时间倒序的第一条 message_position）"""
+    def get_chat_latest_meta(self, chat_id):
+        """获取群最新消息元信息：包含消息总位置与最新一条消息发送时间戳（毫秒）"""
         data = self.list_messages(chat_id, page_size=1, sort_type="ByCreateTimeDesc")
         items = data.get("items", [])
         if not items:
-            return 0
-        return int(items[0].get("message_position") or 0)
+            return {"total": 0, "latest_create_time": 0}
+        item = items[0]
+        return {
+            "total": int(item.get("message_position") or 0),
+            "latest_create_time": int(item.get("create_time") or 0),
+        }
+
+    def get_chat_message_count(self, chat_id):
+        """获取群消息总数（取按时间倒序的第一条 message_position）"""
+        return self.get_chat_latest_meta(chat_id)["total"]
 
     def list_all_messages(self, chat_id, start_position=0):
         """获取群聊全部消息（自动分页），从指定位置开始"""

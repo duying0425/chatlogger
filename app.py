@@ -79,14 +79,14 @@ def timestamp_to_datetime(ts, with_seconds=True):
         return ""
     try:
         ts_int = int(ts)
-        # 飞书的时间戳是毫秒
-        if ts_int > 1e12:
+        # 飞书的时间戳是毫秒（大于 1e10 视为毫秒）
+        if ts_int > 1e10:
             ts_int = ts_int // 1000
         from datetime import datetime, timezone, timedelta
         dt = datetime.fromtimestamp(ts_int, tz=timezone(timedelta(hours=8)))
         fmt = "%Y-%m-%d %H:%M:%S" if with_seconds else "%Y-%m-%d %H:%M"
         return dt.strftime(fmt)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OSError):
         return str(ts)
 
 # ===== 页面路由 =====
@@ -102,6 +102,8 @@ def index():
     chats = models.get_chats(user["id"])
     for chat in chats:
         chat["has_cache"] = local_cache.has_cache(chat["chat_id"], chat.get("chat_name"))
+        lmt = chat.get("latest_message_time")
+        chat["latest_message_time_str"] = timestamp_to_datetime(lmt, with_seconds=False) if lmt else ""
     resp = make_response(render_template_string(INDEX_PAGE, user=user, chats=chats))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
@@ -164,11 +166,13 @@ def api_get_chats():
     chats = models.get_chats(user["id"])
     for chat in chats:
         chat["has_cache"] = local_cache.has_cache(chat["chat_id"], chat.get("chat_name"))
+        lmt = chat.get("latest_message_time")
+        chat["latest_message_time_str"] = timestamp_to_datetime(lmt, with_seconds=False) if lmt else ""
     return jsonify({"chats": chats})
 
 @app.route("/api/chat_stats/<chat_id>", methods=["GET"])
 def api_chat_stats(chat_id):
-    """实时查询群消息总数，返回已同步/待同步条数"""
+    """实时查询群消息总数，返回已同步/待同步条数与最新消息时间"""
     user = get_current_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
@@ -181,7 +185,11 @@ def api_chat_stats(chat_id):
         return jsonify({"error": "群聊未配置"}), 404
 
     try:
-        total = client.get_chat_message_count(chat_id)
+        meta = client.get_chat_latest_meta(chat_id)
+        total = meta.get("total", 0)
+        latest_create_time = meta.get("latest_create_time", 0)
+        if latest_create_time:
+            models.update_chat_latest_message_time(user["id"], chat_id, latest_create_time)
     except Exception as e:
         err_str = str(e)
         # token 失效友好提示
@@ -193,10 +201,13 @@ def api_chat_stats(chat_id):
     last_pos = chat_config.get("last_synced_position", 0) or 0
     # 待同步 = 群里消息总数 - 已同步到的位置
     pending = max(0, total - last_pos)
+    latest_time_str = timestamp_to_datetime(latest_create_time, with_seconds=False) if latest_create_time else ""
     return jsonify({
         "total": total,
         "synced": synced,
         "pending": pending,
+        "latest_message_time": latest_create_time,
+        "latest_message_time_str": latest_time_str,
     })
 
 @app.route("/api/chats/fetch_name", methods=["GET"])
@@ -570,6 +581,7 @@ def api_sync(chat_id):
 
 @app.route("/api/sync_all", methods=["POST"])
 def api_sync_all():
+    """批量启动当前用户所有已配置群聊的同步任务"""
     """批量启动当前用户已配置群聊的同步任务（支持前端指定 chat_ids 过滤）"""
     user = get_current_user()
     if not user:
@@ -614,7 +626,7 @@ def api_sync_all():
         t.start()
         started.append(cid)
 
-    msg = f"已启动 {len(started)} 个待同步群聊的任务"
+    msg = f"已启动 {len(started)} 个群聊的同步任务"
     if skipped:
         msg += f"，{len(skipped)} 个群聊已在同步中（跳过）"
 
@@ -727,6 +739,129 @@ def api_debug_messages(chat_id):
     })
 
 
+def _process_and_save_local_cache(client, user, chat_id, chat_name, cache_messages,
+                                  downloaded_assets=None, skipped_notes=None, record_ids=None,
+                                  on_progress=None):
+    """为指定的一组消息处理本地附件、云文档快照，并格式化追加写入 Markdown 归档文件。"""
+    if not cache_messages:
+        return 0, 0
+
+    downloaded_assets = dict(downloaded_assets or {})
+    skipped_notes = dict(skipped_notes or {})
+    record_ids = list(record_ids or [])
+
+    # 1. 确保 Markdown 文件存在且规范（首次建档时写入头部，群名变更时平滑纠正）
+    local_cache.ensure_chat_header(chat_id, chat_name)
+
+    # 2. 解析发言人姓名
+    speaker_names = {}
+    if user.get("open_id") and user.get("name"):
+        speaker_names[user["open_id"]] = user["name"]
+    try:
+        members_map = client.get_chat_members_safe(chat_id)
+        if members_map:
+            speaker_names.update(members_map)
+    except Exception:
+        pass
+    for m in cache_messages:
+        for item in (m.get("mentions") or []):
+            if isinstance(item, dict):
+                oid = item.get("id", {}).get("open_id") if isinstance(item.get("id"), dict) else None
+                name = item.get("name")
+                if oid and name:
+                    speaker_names[oid] = name
+
+    # 3. 检查并补充附件/图片（优先使用本地已存在的，缺失的才调用接口下载）
+    for m in cache_messages:
+        resources = extract_resource_keys(m)
+        for r in resources:
+            fk = r.get("file_key")
+            if not fk or fk in downloaded_assets:
+                continue
+            fname = r.get("file_name", "")
+            # 优先从本地已有 assets 查找
+            existing_rel = local_cache.find_existing_asset(chat_id, chat_name, fname, fk)
+            if existing_rel:
+                downloaded_assets[fk] = existing_rel
+                continue
+            # 若本地确实没有，尝试下载并保存
+            try:
+                content, f_name = client.download_resource(
+                    r["message_id"], fk, r.get("type", "image"),
+                    max_size_mb=Config.MAX_ATTACHMENT_SIZE_MB,
+                    original_filename=fname
+                )
+                rel_path = local_cache.save_asset(chat_id, chat_name, content, f_name, fk)
+                downloaded_assets[fk] = rel_path
+            except Exception as e:
+                print(f"[local_cache backfill] 下载附件跳过 {fk}: {e}")
+
+    # 4. 云文档快照
+    doc_map = {}
+    doc_fail_map = {}
+    try:
+        def _save_doc(doc_token, title, content):
+            return local_cache.save_doc(chat_id, chat_name, doc_token, title, content)
+
+        def _save_doc_image(image_token):
+            content, ext = client.download_drive_media(image_token)
+            return local_cache.save_doc_image(chat_id, chat_name, image_token, content, ext)
+
+        doc_map, doc_failures = cache_docs_for_messages(
+            client, cache_messages, _save_doc, save_doc_image=_save_doc_image,
+            on_progress=on_progress
+        )
+        doc_fail_map = {token: err for token, err in doc_failures}
+    except Exception as de:
+        print(f"[doc_cache] 云文档缓存失败（不阻断）: {de}")
+
+    # 5. 格式化所有消息并追加写入 Markdown
+    md_blocks = []
+    for i, m in enumerate(cache_messages):
+        sid = m.get("sender", {}).get("id", "")
+        m_type = m.get("msg_type", "")
+        c_time = m.get("create_time")
+        d_str = timestamp_to_datetime(c_time, with_seconds=True)
+
+        if sid.startswith("cli_"):
+            bot_name = m.get("sender", {}).get("name", "") or "机器人"
+            s_name = f"🤖 {bot_name}"
+        elif m_type == "system":
+            s_name = "系统"
+        else:
+            s_name = speaker_names.get(sid, sid or "成员")
+
+        m_assets = {}
+        for r in extract_resource_keys(m):
+            fk = r.get("file_key")
+            if fk and fk in downloaded_assets:
+                m_assets[fk] = downloaded_assets[fk]
+
+        record_id = record_ids[i] if i < len(record_ids) else None
+        m_skipped = list(skipped_notes.get(record_id)) if record_id and skipped_notes.get(record_id) else None
+        if doc_fail_map:
+            for link in extract_doc_links(m):
+                ferr = doc_fail_map.get(link.get("token"))
+                if ferr:
+                    m_skipped = (m_skipped or []) + [f"[云文档快照失败: {ferr}]"]
+        if m_skipped is not None and not m_skipped:
+            m_skipped = None
+
+        block = local_cache.format_message_to_markdown(
+            m, s_name, d_str, asset_map=m_assets, skipped_notes=m_skipped,
+            doc_map=doc_map
+        )
+        md_blocks.append(block)
+
+    local_cache.append_messages_to_cache(chat_id, chat_name, md_blocks)
+
+    max_pos = int(cache_messages[-1].get("message_position") or 0)
+    if max_pos > 0:
+        models.update_chat_last_cached_position(user["id"], chat_id, max_pos)
+
+    return len(cache_messages), len(doc_map)
+
+
 def _run_sync(user_id, chat_id):
     """在后台线程中执行同步主流程，实时更新进度状态。"""
     # 在子线程中重新获取用户和 client（Flask session 在子线程不可用）
@@ -771,10 +906,45 @@ def _run_sync(user_id, chat_id):
         last_position = chat_config.get("last_synced_position", 0) or 0
         messages = client.list_all_messages(chat_id, start_position=last_position)
 
+        # 检查本地缓存断点与断层情况
+        has_local_md = local_cache.has_cache(chat_id, chat_name)
+        cached_pos = 0
+        if has_local_md:
+            cached_pos = chat_config.get("last_cached_position", 0) or 0
+            if cached_pos == 0:
+                file_pos = local_cache.get_last_cached_position_from_file(chat_id, chat_name)
+                if file_pos is not None:
+                    cached_pos = file_pos
+                else:
+                    cached_pos = last_position
+        else:
+            cached_pos = 0
+
+        target_position = int(messages[-1].get("message_position") or 0) if messages else last_position
+        need_cache_backfill = is_local_cache_enabled and (cached_pos < target_position)
+
         if not messages:
-            _set_progress(chat_id, stage="done", running=False, message="没有新消息",
-                          result={"ok": True, "new_count": 0, "message": "没有新消息"})
-            return
+            if need_cache_backfill:
+                _set_progress(chat_id, stage="saving_local_cache", current=0, total=target_position,
+                              message=f"检测到本地缓存尚未建立或存在断层，正在补齐历史消息 (当前进度 {cached_pos}/{target_position})...")
+                backfill_msgs = client.list_all_messages(chat_id, start_position=cached_pos)
+                if backfill_msgs:
+                    _process_and_save_local_cache(client, user, chat_id, chat_name, backfill_msgs)
+                    l_time = int(backfill_msgs[-1].get("create_time") or 0)
+                    if l_time:
+                        models.update_chat_latest_message_time(user["id"], chat_id, l_time)
+                has_cache_now = local_cache.has_cache(chat_id, chat_name)
+                _set_progress(chat_id, stage="done", running=False,
+                              message=f"本地缓存补齐完成：已补全 {len(backfill_msgs)} 条历史消息至 Markdown 归档",
+                              result={"ok": True, "new_count": 0, "backfill_count": len(backfill_msgs),
+                                      "has_cache": has_cache_now, "local_cache": True,
+                                      "total_records": chat_config.get("record_count", 0) or 0})
+                return
+            else:
+                _set_progress(chat_id, stage="done", running=False, message="没有新消息",
+                              result={"ok": True, "new_count": 0, "message": "没有新消息",
+                                      "has_cache": has_local_md, "local_cache": is_local_cache_enabled})
+                return
 
         total = len(messages)
         _set_progress(chat_id, stage="messages_fetched", current=0, total=total,
@@ -1000,83 +1170,39 @@ def _run_sync(user_id, chat_id):
                 except Exception as e:
                     print(f"[写入跳过说明失败] {e}")
 
-        # 7.6 若开启本地缓存，格式化所有消息并追加写入 Markdown 文件
-        doc_map = {}
-        doc_fail_map = {}
+        # 7.6 若开启本地缓存，格式化消息并写入 Markdown 归档（若有历史断层则一并补齐）
+        doc_count = 0
         if is_local_cache_enabled:
             try:
                 _set_progress(chat_id, stage="saving_local_cache", current=0, total=total,
                               message="正在写入本地缓存 Markdown...")
-
-                # 7.65 云文档快照：扫描本轮消息中的飞书云文档链接并缓存内容
-                try:
-                    def _save_doc(doc_token, title, content):
-                        return local_cache.save_doc(chat_id, chat_name, doc_token, title, content)
-
-                    def _save_doc_image(image_token):
-                        content, ext = client.download_drive_media(image_token)
-                        return local_cache.save_doc_image(
-                            chat_id, chat_name, image_token, content, ext)
-
-                    doc_map, doc_failures = cache_docs_for_messages(
-                        client, messages, _save_doc, save_doc_image=_save_doc_image,
-                        on_progress=lambda d, t, msg: _set_progress(
-                            chat_id, stage="caching_docs", current=d, total=t, message=msg))
-                    doc_fail_map = {token: err for token, err in doc_failures}
-                except Exception as de:
-                    print(f"[doc_cache] 云文档缓存失败（不阻断同步）: {de}")
-
-                if doc_map or doc_fail_map:
-                    _set_progress(chat_id, stage="saving_local_cache", current=0, total=total,
-                                  message="正在写入本地缓存 Markdown...")
-
-                md_blocks = []
-                for i, m in enumerate(messages):
-                    sid = m.get("sender", {}).get("id", "")
-                    m_type = m.get("msg_type", "")
-                    c_time = m.get("create_time")
-                    d_str = timestamp_to_datetime(c_time, with_seconds=True)
-
-                    if sid.startswith("cli_"):
-                        bot_name = m.get("sender", {}).get("name", "") or "机器人"
-                        s_name = f"🤖 {bot_name}"
-                    elif m_type == "system":
-                        s_name = "系统"
-                    else:
-                        s_name = speaker_names.get(sid, sid or "成员")
-
-                    # 提取该消息关联的 asset_map: file_key -> rel_path
-                    m_assets = {}
-                    for r in extract_resource_keys(m):
-                        fk = r.get("file_key")
-                        if fk and fk in downloaded_assets:
-                            m_assets[fk] = downloaded_assets[fk]
-
-                    record_id = record_ids[i] if i < len(record_ids) else None
-                    m_skipped = list(skipped_notes.get(record_id)) if record_id and skipped_notes.get(record_id) else None
-                    # 该消息中的云文档快照失败提示（无权限/类型不支持等）
-                    if doc_fail_map:
-                        for link in extract_doc_links(m):
-                            ferr = doc_fail_map.get(link.get("token"))
-                            if ferr:
-                                m_skipped = (m_skipped or []) + [f"[云文档快照失败: {ferr}]"]
-                    if m_skipped is not None and not m_skipped:
-                        m_skipped = None
-
-                    block = local_cache.format_message_to_markdown(
-                        m, s_name, d_str, asset_map=m_assets, skipped_notes=m_skipped,
-                        doc_map=doc_map
+                if cached_pos < last_position:
+                    _set_progress(chat_id, stage="saving_local_cache", current=0, total=target_position,
+                                  message=f"检测到历史缓存存在断层，正在补齐全部缺失消息 (当前进度 {cached_pos}/{target_position})...")
+                    all_cache_msgs = client.list_all_messages(chat_id, start_position=cached_pos)
+                    _, doc_count = _process_and_save_local_cache(
+                        client, user, chat_id, chat_name, all_cache_msgs,
+                        downloaded_assets=downloaded_assets, skipped_notes=skipped_notes,
+                        record_ids=record_ids,
+                        on_progress=lambda d, t, msg: _set_progress(chat_id, stage="caching_docs", current=d, total=t, message=msg)
                     )
-                    md_blocks.append(block)
-
-                local_cache.append_messages_to_cache(chat_id, chat_name, md_blocks)
+                else:
+                    _, doc_count = _process_and_save_local_cache(
+                        client, user, chat_id, chat_name, messages,
+                        downloaded_assets=downloaded_assets, skipped_notes=skipped_notes,
+                        record_ids=record_ids,
+                        on_progress=lambda d, t, msg: _set_progress(chat_id, stage="caching_docs", current=d, total=t, message=msg)
+                    )
             except Exception as ce:
                 print(f"[local_cache] 写入 Markdown 失败: {ce}")
 
-        # 8. 更新同步状态
+        # 8. 更新同步状态与最新消息时间
         new_last_position = int(messages[-1].get("message_position") or 0)
         new_record_count = (chat_config.get("record_count", 0) or 0) + len(messages)
         models.update_chat_sync_status(user["id"], chat_id, new_last_position, new_record_count)
+        l_time = int(messages[-1].get("create_time") or 0)
+        if l_time:
+            models.update_chat_latest_message_time(user["id"], chat_id, l_time)
 
         if not chat_config.get("chat_name"):
             models.update_chat_table_info(user["id"], chat_id, base_token, table_id, base_url, chat_name)
@@ -1087,7 +1213,7 @@ def _run_sync(user_id, chat_id):
             "new_count": len(messages),
             "attach_count": attach_count,
             "skipped_count": skipped_count,
-            "doc_count": len(doc_map),
+            "doc_count": doc_count,
             "total_records": new_record_count,
             "base_url": base_url,
             "local_cache": is_local_cache_enabled,
@@ -1099,7 +1225,7 @@ def _run_sync(user_id, chat_id):
                       message=f"同步完成：新增 {len(messages)} 条消息" +
                               (f"，附件 {attach_count} 个" if attach_count > 0 else "") +
                               (f"，跳过大附件 {skipped_count} 个" if skipped_count > 0 else "") +
-                              (f"，云文档快照 {len(doc_map)} 篇" if doc_map else "") +
+                              (f"，云文档快照 {doc_count} 篇" if doc_count > 0 else "") +
                               cache_suffix,
                       result=result)
 
@@ -1387,6 +1513,8 @@ INDEX_PAGE = r"""
         .add-chat button { padding: 10px 22px; background: #3370ff; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.2s; }
         .add-chat button:hover { background: #2860e1; }
         .chat-list { display: flex; flex-direction: column; gap: 12px; }
+        .chat-item { background: white; border-radius: 12px; padding: 18px 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; transition: box-shadow 0.2s; border-left: 4px solid transparent; }
+        .chat-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
         .chat-item { background: white; border-radius: 12px; padding: 18px 22px; border: 1px solid #dee0e3; border-left: 4px solid #dee0e3; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; transition: border-color 0.2s, box-shadow 0.2s; }
         .chat-item:hover { border-color: #3370ff; box-shadow: 0 4px 16px rgba(51,112,255,0.12); }
         .chat-item.status-pending { border-left-color: #ff7d00; }
@@ -1458,6 +1586,7 @@ INDEX_PAGE = r"""
         .sync-progress.done .bar { background: #00b42a; }
         /* 本地缓存增强样式 */
         .chat-item.is-clickable { cursor: pointer; }
+        .chat-item.is-clickable:hover { border-color: #b3ccff; box-shadow: 0 4px 16px rgba(51,112,255,0.08); }
         .chat-item.is-clickable:hover { box-shadow: 0 4px 16px rgba(51,112,255,0.14); }
         .name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
         .preview-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #e8f3ff; color: #3370ff; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; }
@@ -1608,7 +1737,7 @@ INDEX_PAGE = r"""
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
-                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}">
+                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
                     <div class="chat-info" {% if chat.has_cache %}onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览"{% endif %}>
                         <div class="name-row">
                             <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
@@ -1625,6 +1754,7 @@ INDEX_PAGE = r"""
                             <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/view" target="_blank" onclick="event.stopPropagation()" class="link-cache">在线预览</a>
                             <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/download" onclick="event.stopPropagation()" class="link-cache">下载ZIP</a>
                             {% endif %}
+                            <span class="latest-time-wrap" id="latest-time-wrap-{{ chat.chat_id }}" {% if not chat.latest_message_time_str %}style="display:none;"{% endif %}><span class="dot">·</span><span class="latest-time-text" id="latest-time-{{ chat.chat_id }}" title="群聊最新一条消息发送时间">最新消息: {{ chat.latest_message_time_str }}</span></span>
                         </div>
                         <div class="stats-row">
                             <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
@@ -2066,6 +2196,7 @@ INDEX_PAGE = r"""
             setSyncAllButtonState(true);
 
             try {
+                const resp = await fetch('/api/sync_all', { method: 'POST' });
                 const resp = await fetch('/api/sync_all', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2073,12 +2204,14 @@ INDEX_PAGE = r"""
                 });
                 const data = await resp.json();
                 if (data.ok) {
+                    showToast(data.message || '已启动全部群聊同步', 'success');
                     let tipMsg = data.message;
                     if (alreadySyncedCount > 0 && data.started && data.started.length > 0) {
                         tipMsg = '已启动 ' + data.started.length + ' 个待同步群聊（自动跳过 ' + alreadySyncedCount + ' 个已同步满群聊）';
                     }
                     showToast(tipMsg || '已启动群聊同步任务', 'success');
                     const startedSet = new Set(data.started || []);
+                    document.querySelectorAll('.chat-item').forEach(item => {
                     items.forEach(item => {
                         const cid = item.getAttribute('data-chat-id');
                         if (cid && startedSet.has(cid)) {
@@ -2092,6 +2225,7 @@ INDEX_PAGE = r"""
                             startPolling(cid, chatBtn);
                         }
                     });
+                    monitorAllSyncProgress();
                     if (data.started && data.started.length > 0) {
                         monitorAllSyncProgress();
                     } else {
@@ -2107,9 +2241,27 @@ INDEX_PAGE = r"""
             }
         }
 
-        // 页面加载后实时查询每个群的待同步条数
+        function sortChatListByLatestTime() {
+            const list = document.getElementById('chatList');
+            if (!list) return;
+            const searchInput = document.getElementById('chatSearchInput');
+            if (searchInput && searchInput.value.trim()) return;
+
+            const items = Array.from(list.querySelectorAll('.chat-item'));
+            if (items.length <= 1) return;
+
+            items.sort((a, b) => {
+                const tA = parseInt(a.dataset.latestTime || '0', 10);
+                const tB = parseInt(b.dataset.latestTime || '0', 10);
+                return tB - tA;
+            });
+            items.forEach(item => list.appendChild(item));
+        }
+
+        // 页面加载后实时查询每个群的待同步条数与最新消息时间
         document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('.stats').forEach(async (el) => {
+            const statElements = Array.from(document.querySelectorAll('.stats'));
+            const statTasks = statElements.map(async (el) => {
                 const chatId = el.dataset.chatId;
                 if (!chatId) return;
                 try {
@@ -2129,6 +2281,19 @@ INDEX_PAGE = r"""
                     } else {
                         updateChatStatus(chatId, 'synced', '已同步满');
                     }
+
+                    if (data.latest_message_time_str) {
+                        const wrap = document.getElementById('latest-time-wrap-' + chatId);
+                        const text = document.getElementById('latest-time-' + chatId);
+                        if (wrap && text) {
+                            text.textContent = '最新消息: ' + data.latest_message_time_str;
+                            wrap.style.display = 'inline';
+                        }
+                        const item = document.getElementById('chat-' + chatId);
+                        if (item && data.latest_message_time) {
+                            item.dataset.latestTime = data.latest_message_time;
+                        }
+                    }
                 } catch (e) {
                     // 查询失败保持原状
                 }
@@ -2145,6 +2310,10 @@ INDEX_PAGE = r"""
                         monitorAllSyncProgress();
                     }
                 } catch (e) {}
+            });
+
+            Promise.allSettled(statTasks).then(() => {
+                sortChatListByLatestTime();
             });
         });
         // ===== 群名称自动获取与防覆写逻辑 =====
@@ -2462,6 +2631,7 @@ INDEX_PAGE = r"""
                         : '<div class="item-avatar">' + escapeHtml((c.chat_name || '群').charAt(0).toUpperCase()) + '</div>';
                     const nameHtml = highlightMatch(c.chat_name || '未命名群聊', q);
                     const idHtml = highlightMatch(c.chat_id, q);
+                    const tagHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
                     const addedHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
                     const dissolvedHtml = (c.chat_status === 'dissolved_save') ? '<span class="item-tag-dissolved" title="该群已解散，但飞书保留了历史消息，仍可归档">已解散(保留历史)</span>' : '';
                     const tagHtml = addedHtml + dissolvedHtml;

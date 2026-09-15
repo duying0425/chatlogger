@@ -390,5 +390,191 @@ class LocalCacheTestSuite(unittest.TestCase):
             self.assertIn("15MB", str(ctx.exception))
 
 
+    def test_backfill_cache_when_no_new_messages(self):
+        """测试在飞书无新消息时，因本地无缓存自动全量补齐历史消息到 Markdown 且不重复写表格"""
+        from unittest.mock import MagicMock, patch
+        import app as app_module
+
+        bf_chat_id = "oc_bf_test_01"
+        bf_chat_name = "补齐测试群"
+        models.add_chat(self.user["id"], bf_chat_id, bf_chat_name, local_cache=1)
+        models.update_chat_sync_status(self.user["id"], bf_chat_id, 5, 5)
+        models.update_chat_table_info(self.user["id"], bf_chat_id, "tbl_token", "tbl_id", "tbl_url", bf_chat_name)
+
+        self.assertFalse(local_cache.has_cache(bf_chat_id, bf_chat_name))
+
+        mock_client = MagicMock()
+        mock_client.get_chat_info.return_value = {"name": bf_chat_name}
+        mock_client.get_chat_members_safe.return_value = {}
+        # start_position=5 时无新消息；start_position=0 时返回 5 条历史
+        history_msgs = [
+            {
+                "message_id": f"om_h_{i}",
+                "message_position": str(i),
+                "msg_type": "text",
+                "create_time": f"177000000{i}000",
+                "sender": {"id": f"ou_user_{i}"},
+                "body": {"content": json.dumps({"text": f"历史消息 {i}"})},
+            }
+            for i in range(1, 6)
+        ]
+
+        def fake_list_all(cid, start_position=0):
+            if start_position == 5:
+                return []
+            if start_position == 0:
+                return history_msgs
+            return []
+
+        mock_client.list_all_messages.side_effect = fake_list_all
+
+        with patch("app.FeishuClient", return_value=mock_client):
+            app_module._run_sync(self.user["id"], bf_chat_id)
+
+        # 验证 Markdown 缓存已建立
+        self.assertTrue(local_cache.has_cache(bf_chat_id, bf_chat_name))
+        raw_md = local_cache.get_raw_markdown(bf_chat_id, bf_chat_name)
+        self.assertIn("历史消息 1", raw_md)
+        self.assertIn("历史消息 5", raw_md)
+        self.assertIn(bf_chat_name, raw_md)
+
+        # 绝不写入多维表格
+        mock_client.batch_create_records.assert_not_called()
+
+        # 数据库状态更新
+        chat_row = models.get_chat(self.user["id"], bf_chat_id)
+        self.assertEqual(chat_row["last_cached_position"], 5)
+        self.assertEqual(chat_row["latest_message_time"], 1770000005000)
+
+        # 清理
+        local_cache.delete_cache(bf_chat_id, bf_chat_name)
+
+    def test_backfill_cache_gap_when_cache_was_disabled(self):
+        """测试本地缓存曾经关闭导致断层时，同步能自动补齐断层历史消息"""
+        from unittest.mock import MagicMock, patch
+        import app as app_module
+
+        gap_chat_id = "oc_gap_test_02"
+        gap_chat_name = "断层补齐群"
+        models.add_chat(self.user["id"], gap_chat_id, gap_chat_name, local_cache=1)
+        # 飞书已同步到 10，但本地只缓存到 5
+        models.update_chat_sync_status(self.user["id"], gap_chat_id, 10, 10)
+        models.update_chat_last_cached_position(self.user["id"], gap_chat_id, 5)
+        models.update_chat_table_info(self.user["id"], gap_chat_id, "tbl_token", "tbl_id", "tbl_url", gap_chat_name)
+
+        # 先写入 1-5
+        init_blocks = [f"<!-- msg_pos:{i} msg_id:om_{i} -->\n**用户** &nbsp; `2026-09-15 10:00:00`\n\n消息 {i}\n\n---\n" for i in range(1, 6)]
+        local_cache.append_messages_to_cache(gap_chat_id, gap_chat_name, init_blocks)
+        self.assertTrue(local_cache.has_cache(gap_chat_id, gap_chat_name))
+
+        # 新拉取消息：start_position=10 返回 11-12
+        new_msgs = [
+            {
+                "message_id": f"om_{i}",
+                "message_position": str(i),
+                "msg_type": "text",
+                "create_time": f"177000000{i:02d}000",
+                "sender": {"id": "ou_user"},
+                "body": {"content": json.dumps({"text": f"消息 {i}"})},
+            }
+            for i in range(11, 13)
+        ]
+        # 断层消息：start_position=5 返回 6-12
+        gap_msgs = [
+            {
+                "message_id": f"om_{i}",
+                "message_position": str(i),
+                "msg_type": "text",
+                "create_time": f"177000000{i:02d}000",
+                "sender": {"id": "ou_user"},
+                "body": {"content": json.dumps({"text": f"消息 {i}"})},
+            }
+            for i in range(6, 13)
+        ]
+
+        mock_client = MagicMock()
+        mock_client.get_chat_info.return_value = {"name": gap_chat_name}
+        mock_client.get_chat_members_safe.return_value = {}
+        mock_client.batch_create_records.return_value = ["rec_11", "rec_12"]
+
+        def fake_list(cid, start_position=0):
+            if start_position == 10:
+                return new_msgs
+            if start_position == 5:
+                return gap_msgs
+            return []
+
+        mock_client.list_all_messages.side_effect = fake_list
+
+        with patch("app.FeishuClient", return_value=mock_client):
+            app_module._run_sync(self.user["id"], gap_chat_id)
+
+        # 验证表格只写入了 2 条新消息（11-12）
+        mock_client.batch_create_records.assert_called_once()
+        records_arg = mock_client.batch_create_records.call_args[0][2]
+        self.assertEqual(len(records_arg), 2)
+
+        # 验证 Markdown 包含 1 到 12 全部消息
+        raw_md = local_cache.get_raw_markdown(gap_chat_id, gap_chat_name)
+        for i in range(1, 13):
+            self.assertIn(f"消息 {i}", raw_md)
+
+        # 验证 last_cached_position 更新至 12
+        chat_row = models.get_chat(self.user["id"], gap_chat_id)
+        self.assertEqual(chat_row["last_cached_position"], 12)
+
+        local_cache.delete_cache(gap_chat_id, gap_chat_name)
+
+    def test_chats_ordering_by_latest_message_time(self):
+        """测试主页群聊列表按最新消息发送时间倒序排列"""
+        sort_user = models.get_or_create_user("ou_sort_isolation_user", "独立排序测试用户")
+        uid = sort_user["id"]
+        c1 = "oc_sort_01"
+        c2 = "oc_sort_02"
+        c3 = "oc_sort_03"
+        models.add_chat(uid, c1, "群1")
+        models.add_chat(uid, c2, "群2")
+        models.add_chat(uid, c3, "群3")
+
+        # 设置不同最新消息时间戳
+        models.update_chat_latest_message_time(uid, c1, 1000000)
+        models.update_chat_latest_message_time(uid, c2, 3000000)  # 最晚
+        models.update_chat_latest_message_time(uid, c3, 2000000)  # 次晚
+
+        chats = models.get_chats(uid)
+        ids = [c["chat_id"] for c in chats]
+        # c2 (3000000) 应该排第一，c3 (2000000) 第二，c1 (1000000) 第三
+        self.assertEqual(ids[:3], [c2, c3, c1])
+
+    def test_ensure_chat_header_and_find_existing_asset(self):
+        """测试 Markdown 头部平滑更新与本地已有附件快速命中"""
+        t_id = "oc_header_test"
+        # 1. 初始为 chat_id
+        local_cache.init_chat_cache(t_id, t_id)
+        raw = local_cache.get_raw_markdown(t_id, t_id)
+        self.assertIn(f"# {t_id} - 聊天记录归档", raw)
+
+        # 2. 获取到真实名字后平滑更新
+        real_name = "全新自动驾驶战略群"
+        local_cache.ensure_chat_header(t_id, real_name)
+        raw_updated = local_cache.get_raw_markdown(t_id, real_name)
+        self.assertIn(f"# {real_name} - 聊天记录归档", raw_updated)
+        self.assertIn(f"> - **群聊名称**: {real_name}", raw_updated)
+
+        # 3. 查找已有附件（按文件名查找）
+        local_cache.save_asset(t_id, real_name, b"test_content", "notice.pdf", "file_k01")
+        found = local_cache.find_existing_asset(t_id, real_name, "notice.pdf", "file_k01")
+        self.assertIsNotNone(found)
+        self.assertEqual(found, "assets/notice.pdf")
+
+        # 4. 根据 file_key 匹配（未提供文件名，按 key 回退命名）
+        local_cache.save_asset(t_id, real_name, b"img_bytes", "", "img_k02")
+        found_key = local_cache.find_existing_asset(t_id, real_name, "", "img_k02")
+        self.assertIsNotNone(found_key)
+        self.assertEqual(found_key, "assets/img_k02")
+
+        local_cache.delete_cache(t_id, real_name)
+
+
 if __name__ == "__main__":
     unittest.main()
