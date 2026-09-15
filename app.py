@@ -2406,7 +2406,6 @@ INDEX_PAGE = r"""
                         : '<div class="item-avatar">' + escapeHtml((c.chat_name || '群').charAt(0).toUpperCase()) + '</div>';
                     const nameHtml = highlightMatch(c.chat_name || '未命名群聊', q);
                     const idHtml = highlightMatch(c.chat_id, q);
-                    const tagHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
                     const addedHtml = c.is_added ? '<span class="item-tag-added">已在列表</span>' : '';
                     const dissolvedHtml = (c.chat_status === 'dissolved_save') ? '<span class="item-tag-dissolved" title="该群已解散，但飞书保留了历史消息，仍可归档">已解散(保留历史)</span>' : '';
                     const tagHtml = addedHtml + dissolvedHtml;
