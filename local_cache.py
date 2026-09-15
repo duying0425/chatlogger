@@ -576,3 +576,83 @@ def delete_cache(chat_id, chat_name=None):
 
     return deleted
 
+
+def rename_chat_cache(chat_id, new_chat_name, old_chat_name=None):
+    """当群聊名称发生变更时，自动联动重命名本地缓存目录、Markdown 文件，并更新 Markdown 头部标题。"""
+    base_dir = os.path.abspath(Config.LOCAL_CACHE_DIR)
+    if not os.path.exists(base_dir):
+        return {"renamed": False, "reason": "cache_dir_not_found"}
+
+    # 1. 查找现有缓存目录（匹配 _{chat_id} 或直接为 {chat_id}）
+    old_dir = None
+    for entry in os.listdir(base_dir):
+        full_entry = os.path.join(base_dir, entry)
+        if os.path.isdir(full_entry) and (entry.endswith(f"_{chat_id}") or entry == chat_id):
+            old_dir = full_entry
+            break
+
+    if not old_dir:
+        return {"renamed": False, "reason": "no_existing_cache"}
+
+    safe_new_name = sanitize_filename(new_chat_name or chat_id, fallback="chat")
+    new_dir_name = f"{safe_new_name}_{chat_id}"
+    new_dir = os.path.join(base_dir, new_dir_name)
+
+    # 2. 如果目录名称不同，重命名目录
+    current_dir = old_dir
+    if os.path.abspath(old_dir) != os.path.abspath(new_dir):
+        try:
+            if not os.path.exists(new_dir):
+                os.rename(old_dir, new_dir)
+                current_dir = new_dir
+        except Exception as e:
+            print(f"[local_cache] 重命名群聊缓存目录失败: {e}")
+            current_dir = old_dir
+
+    # 3. 重命名 .md 文件
+    old_md_path = None
+    for f in os.listdir(current_dir):
+        if f.endswith(".md"):
+            old_md_path = os.path.join(current_dir, f)
+            break
+
+    new_md_name = f"{safe_new_name}.md"
+    new_md_path = os.path.join(current_dir, new_md_name)
+
+    if old_md_path and os.path.exists(old_md_path):
+        if os.path.abspath(old_md_path) != os.path.abspath(new_md_path):
+            try:
+                os.rename(old_md_path, new_md_path)
+            except Exception as e:
+                print(f"[local_cache] 重命名 Markdown 文件失败: {e}")
+                new_md_path = old_md_path
+
+        # 4. 更新 Markdown 头部标题与元信息
+        try:
+            with open(new_md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            display_name = new_chat_name or chat_id
+            # 替换正文第一级大标题 # ... - 聊天记录归档
+            content = re.sub(
+                r"^#\s+[^\n]+?\s+-\s+聊天记录归档",
+                f"# {display_name} - 聊天记录归档",
+                content,
+                count=1,
+                flags=re.MULTILINE
+            )
+            # 替换元数据行 > - **群聊名称**: ...
+            content = re.sub(
+                r"> - \*\*群聊名称\*\*:\s*[^\n]+",
+                f"> - **群聊名称**: {display_name}",
+                content,
+                count=1
+            )
+            with open(new_md_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            print(f"[local_cache] 更新 Markdown 头部标题失败: {e}")
+
+    return {"renamed": True, "dir": current_dir, "md": new_md_path}
+
+

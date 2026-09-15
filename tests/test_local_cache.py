@@ -575,6 +575,54 @@ class LocalCacheTestSuite(unittest.TestCase):
 
         local_cache.delete_cache(t_id, real_name)
 
+    def test_rename_chat_cache_and_update_names(self):
+        """测试修改群名时联动重命名本地缓存文件夹、Markdown文件及数据库记录"""
+        t_id = "oc_rename_unit_test"
+        old_name = "原始测试群"
+        new_name = "全新架构重构群"
+        feishu_name = "飞书实际群名称"
+
+        # 1. 创建初始本地缓存
+        local_cache.init_chat_cache(t_id, old_name)
+        old_dir = local_cache.get_chat_cache_dir(t_id, old_name)
+        self.assertTrue(os.path.exists(old_dir))
+        self.assertTrue(os.path.exists(os.path.join(old_dir, f"{old_name}.md")))
+
+        # 2. 执行 rename_chat_cache
+        res = local_cache.rename_chat_cache(t_id, new_name, old_name)
+        self.assertTrue(res.get("renamed"))
+        new_dir = local_cache.get_chat_cache_dir(t_id, new_name)
+        self.assertTrue(os.path.exists(new_dir))
+        self.assertFalse(os.path.exists(old_dir))
+
+        new_md_path = os.path.join(new_dir, f"{new_name}.md")
+        self.assertTrue(os.path.exists(new_md_path))
+
+        with open(new_md_path, "r", encoding="utf-8") as f:
+            md_content = f.read()
+        self.assertIn(f"# {new_name} - 聊天记录归档", md_content)
+        self.assertIn(f"> - **群聊名称**: {new_name}", md_content)
+
+        # 3. 测试 models.update_chat_names
+        user = models.get_or_create_user("test_rename_open_id", "test_user")
+        uid = user["id"]
+        models.add_chat(uid, t_id, chat_name=old_name)
+        models.save_user_chats_cache(uid, [{"chat_id": t_id, "name": old_name}])
+
+        models.update_chat_names(uid, t_id, chat_name=new_name, feishu_name=feishu_name)
+        c = models.get_chat(uid, t_id)
+        self.assertIsNotNone(c)
+        self.assertEqual(c["chat_name"], new_name)
+        self.assertEqual(c["feishu_name"], feishu_name)
+
+        cached_list = models.get_user_chats_cache(uid)
+        matched = [x for x in cached_list if x["chat_id"] == t_id]
+        self.assertTrue(len(matched) > 0)
+        self.assertEqual(matched[0]["chat_name"], feishu_name)
+
+        # 清理
+        local_cache.delete_cache(t_id, new_name)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -400,6 +400,70 @@ def api_toggle_cache(chat_id):
     models.update_chat_local_cache(user["id"], chat_id, enabled)
     return jsonify({"ok": True, "local_cache": enabled})
 
+@app.route("/api/chats/<chat_id>/edit_name", methods=["POST"])
+def api_edit_chat_name(chat_id):
+    """修改群聊自定义名称与/或刷新飞书真实群名，并内置自动联动重命名本地缓存与云端多维表格"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "未登录"}), 401
+
+    chat_config = models.get_chat(user["id"], chat_id)
+    if not chat_config:
+        return jsonify({"error": "群聊未配置"}), 404
+
+    data = request.get_json(silent=True) or {}
+    new_chat_name = data.get("chat_name")
+    new_feishu_name = data.get("feishu_name")
+
+    real_feishu_name = chat_config.get("feishu_name")
+    if new_feishu_name is not None and new_feishu_name.strip():
+        real_feishu_name = new_feishu_name.strip()
+
+    # 确定最终群聊展示名：自定义名称优先；若为空则使用飞书实际群名；再无则使用原名称或 chat_id
+    if new_chat_name is not None and new_chat_name.strip():
+        final_chat_name = new_chat_name.strip()
+    else:
+        final_chat_name = real_feishu_name or chat_config.get("chat_name") or chat_id
+
+    # 1. 更新数据库 chats 和 user_chats_cache 表
+    models.update_chat_names(user["id"], chat_id, chat_name=final_chat_name, feishu_name=real_feishu_name)
+
+    # 2. 联动重命名本地缓存文件夹和 Markdown 文件
+    cache_rename_result = None
+    try:
+        cache_rename_result = local_cache.rename_chat_cache(
+            chat_id=chat_id,
+            new_chat_name=final_chat_name,
+            old_chat_name=chat_config.get("chat_name")
+        )
+    except Exception as e:
+        print(f"[edit_name] 联动重命名本地缓存失败: {e}")
+
+    # 3. 联动更新飞书云端多维表格名称
+    bitable_rename_result = None
+    client = get_feishu_client()
+    if client and chat_config.get("base_token"):
+        base_token = chat_config["base_token"]
+        table_id = chat_config.get("table_id")
+        try:
+            bitable_rename_result = client.update_bitable_name(
+                base_token=base_token,
+                table_id=table_id,
+                app_name=final_chat_name,
+                table_name=final_chat_name
+            )
+        except Exception as e:
+            print(f"[edit_name] 联动更新飞书多维表格名称失败: {e}")
+
+    return jsonify({
+        "ok": True,
+        "chat_id": chat_id,
+        "chat_name": final_chat_name,
+        "feishu_name": real_feishu_name,
+        "cache_rename": cache_rename_result,
+        "bitable_rename": bitable_rename_result
+    })
+
 @app.route("/api/chats/<chat_id>", methods=["DELETE"])
 def api_delete_chat(chat_id):
     user = get_current_user()
@@ -1556,6 +1620,8 @@ INDEX_PAGE = r"""
         .card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
         .card-title-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; flex: 1; }
         .card-title-group .name { font-size: 15px; font-weight: 600; color: #1f2329; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+        .btn-edit-name { cursor: pointer; font-size: 13px; opacity: 0.6; padding: 2px 4px; border-radius: 4px; transition: opacity 0.2s, background 0.2s; user-select: none; }
+        .btn-edit-name:hover { opacity: 1; background: #e5e6eb; }
         .feishu-origin-tag { background: #f2f3f5; color: #646a73; padding: 2px 8px; border-radius: 4px; font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .card-primary-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
         .btn-preview-tag { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px; border-radius: 8px; font-size: 12px; background: #e8f3ff; color: #3370ff; font-weight: 500; text-decoration: none; cursor: pointer; transition: all 0.2s; border: 1px solid rgba(51, 112, 255, 0.2); }
@@ -1635,8 +1701,17 @@ INDEX_PAGE = r"""
         .delete-cache-label.disabled { color: #8f959e; cursor: not-allowed; }
         .delete-cache-label.disabled input[type="checkbox"] { cursor: not-allowed; }
         .delete-cache-tip { font-size: 12px; color: #86909c; margin-top: 5px; padding-left: 24px; line-height: 1.4; }
+        /* 编辑群名弹窗样式 */
+        .edit-name-group { margin-bottom: 16px; text-align: left; }
+        .edit-name-label { display: block; font-size: 12px; color: #646a73; margin-bottom: 6px; font-weight: 500; }
+        .edit-name-input { width: 100%; padding: 8px 12px; border: 1px solid #dee0e3; border-radius: 6px; font-size: 13px; box-sizing: border-box; outline: none; transition: border-color 0.2s; }
+        .edit-name-input:focus { border-color: #3370ff; box-shadow: 0 0 0 2px rgba(51,112,255,0.15); }
+        .real-name-row { display: flex; align-items: center; justify-content: space-between; background: #f7f8fa; padding: 8px 12px; border-radius: 6px; border: 1px solid #dee0e3; }
+        .real-name-val { font-size: 13px; color: #1f2329; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+        .btn-refresh-realname { background: white; border: 1px solid #dee0e3; padding: 4px 10px; border-radius: 6px; font-size: 12px; color: #3370ff; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+        .btn-refresh-realname:hover { background: #e8f3ff; border-color: #3370ff; }
+        .edit-name-tip { font-size: 12px; color: #1f2329; margin-top: 12px; line-height: 1.5; background: #e8f3ff; padding: 9px 12px; border-radius: 6px; border: 1px solid #b3ccff; text-align: left; }
         /* 同步进度条 */
-        .sync-progress { margin-top: 10px; display: none; }
         .sync-progress { margin-top: 6px; display: none; }
         .sync-progress .stage { font-size: 12px; color: #4e5969; margin-bottom: 6px; line-height: 1.4; }
         .sync-progress .bar-wrap { width: 100%; height: 6px; background: #f2f3f5; border-radius: 3px; overflow: hidden; }
@@ -1796,39 +1871,22 @@ INDEX_PAGE = r"""
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
-                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
-                    <div class="chat-info" {% if chat.has_cache %}onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览"{% endif %}>
-                        <div class="name-row">
-                            <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
-                            {% if chat.has_cache %}
-                            <span class="preview-tag" onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览">📑 预览归档</span>
                 <div class="chat-item" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
                     <div class="card-header">
                         <div class="card-title-group">
-                            <div class="name" title="{{ chat.chat_name or chat.chat_id }}">{{ chat.chat_name or chat.chat_id }}</div>
+                            <div class="name" id="name-{{ chat.chat_id }}" title="{{ chat.chat_name or chat.chat_id }}">{{ chat.chat_name or chat.chat_id }}</div>
+                            <span class="btn-edit-name" onclick="openEditNameModal('{{ chat.chat_id }}', '{{ chat.chat_name or '' }}', '{{ chat.feishu_name or '' }}', event)" title="修改群聊名称">✏️</span>
                             <span class="badge" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text"></span></span>
                             {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}
-                            <span class="feishu-origin-tag feishu-tag" title="飞书真实群名: {{ chat.feishu_name }}">原名: {{ chat.feishu_name }}</span>
+                            <span class="feishu-origin-tag feishu-tag" id="origin-tag-{{ chat.chat_id }}" title="飞书真实群名: {{ chat.feishu_name }}">原名: {{ chat.feishu_name }}</span>
+                            {% else %}
+                            <span class="feishu-origin-tag feishu-tag" id="origin-tag-{{ chat.chat_id }}" style="display:none;"></span>
                             {% endif %}
                         </div>
-                        <div class="meta" id="meta-{{ chat.chat_id }}">
-                            {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}<span class="feishu-tag" title="飞书真实群名">{{ chat.feishu_name }}</span>{% endif %}
-                            <span class="id">{{ chat.chat_id }}</span>
-                            {% if chat.record_count %}<span class="dot">·</span><span>已同步 <span class="record-count">{{ chat.record_count }}</span> 条</span>{% endif %}
-                            {% if chat.base_url %}<span class="dot">·</span><a href="{{ chat.base_url }}" target="_blank" onclick="event.stopPropagation()">查看表格</a>{% endif %}
-                            {% if chat.has_cache %}
-                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/view" target="_blank" onclick="event.stopPropagation()" class="link-cache">在线预览</a>
-                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/download" onclick="event.stopPropagation()" class="link-cache">下载ZIP</a>
-                            {% endif %}
-                            <span class="latest-time-wrap" id="latest-time-wrap-{{ chat.chat_id }}" {% if not chat.latest_message_time_str %}style="display:none;"{% endif %}><span class="dot">·</span><span class="latest-time-text" id="latest-time-{{ chat.chat_id }}" title="群聊最新一条消息发送时间">最新消息: {{ chat.latest_message_time_str }}</span></span>
                         <div class="card-primary-actions">
                             <a href="/cache/{{ chat.chat_id }}/view" target="_blank" class="btn-preview-tag" id="preview-btn-{{ chat.chat_id }}" {% if not chat.has_cache %}style="display:none;"{% endif %} title="点击在新标签页查看本地 Markdown 归档与附件">📑 预览归档</a>
                             <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
                         </div>
-                        <div class="stats-row">
-                            <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
-                            <span class="badge badge-syncing" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text">同步中</span></span>
-                            <label class="cache-toggle-wrap" onclick="event.stopPropagation()" title="开启后，同步时自动保存 Markdown 记录并下载图片和附件">
                     </div>
                     <div class="card-metrics">
                         <div class="metric-item id-metric" title="点击复制完整群 ID" onclick="copyChatId('{{ chat.chat_id }}', event)">
@@ -1864,16 +1922,10 @@ INDEX_PAGE = r"""
                                 <a href="/cache/{{ chat.chat_id }}/download" class="footer-link">下载 ZIP ⬇</a>
                             </span>
                         </div>
-                        <div class="sync-progress" id="progress-{{ chat.chat_id }}">
-                            <div class="stage">准备中...</div>
-                            <div class="bar-wrap"><div class="bar"></div></div>
                         <div class="footer-right">
                             <button class="btn-delete-clean" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                         </div>
                     </div>
-                    <div class="chat-actions" onclick="event.stopPropagation()">
-                        <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
-                        <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                     <div class="sync-progress" id="progress-{{ chat.chat_id }}">
                         <div class="stage">准备中...</div>
                         <div class="bar-wrap"><div class="bar"></div></div>
@@ -1901,6 +1953,30 @@ INDEX_PAGE = r"""
                 <button class="btn-cancel" onclick="closeDeleteModal()">取消</button>
                 <button class="btn-only-config" onclick="doDelete(false)">仅删配置</button>
                 <button class="btn-delete-all" onclick="doDelete(true)">同时删表格</button>
+            </div>
+        </div>
+    </div>
+    <div class="modal-mask" id="editNameModal" onclick="if(event.target===this) closeEditNameModal()">
+        <div class="modal">
+            <h3>修改群聊名称</h3>
+            <p style="margin-bottom: 16px;">支持设置自定义群聊名称，并可随时从飞书拉取最新官方群名。</p>
+            <div class="edit-name-group">
+                <span class="edit-name-label">飞书实际群名（官方原名）</span>
+                <div class="real-name-row">
+                    <span class="real-name-val" id="modalRealNameVal">未获取</span>
+                    <button type="button" class="btn-refresh-realname" id="btnRefreshRealName" onclick="refreshRealNameInModal()">🔄 从飞书拉取最新</button>
+                </div>
+            </div>
+            <div class="edit-name-group">
+                <label class="edit-name-label" for="modalCustomNameInput">自定义群聊名称（留空则默认使用飞书实际群名）</label>
+                <input type="text" class="edit-name-input" id="modalCustomNameInput" placeholder="请输入自定义群聊名称..." onkeydown="if(event.key==='Enter') saveChatName()">
+            </div>
+            <div class="edit-name-tip">
+                💡 保存后将自动联动重命名本地 Markdown 归档文件与云端飞书多维表格。
+            </div>
+            <div class="modal-btns" style="margin-top: 20px;">
+                <button class="btn-cancel" onclick="closeEditNameModal()">取消</button>
+                <button class="btn-only-config" id="btnSaveChatName" onclick="saveChatName()">保存修改</button>
             </div>
         </div>
     </div>
@@ -2034,6 +2110,7 @@ INDEX_PAGE = r"""
                 });
                 const data = await resp.json();
                 if (data.ok) {
+                    showToast(enabled ? '已开启该群本地缓存' : '已关闭该群本地缓存', 'success');
                     const item = document.getElementById('chat-' + chatId);
                     const previewBtn = document.getElementById('preview-btn-' + chatId);
                     const hasCache = previewBtn && previewBtn.style.display !== 'none';
@@ -2135,6 +2212,139 @@ INDEX_PAGE = r"""
                 showToast('网络错误', 'error');
             } finally {
                 closeDeleteModal();
+            }
+        }
+
+        let currentEditChatId = null;
+        let currentRealName = '';
+
+        function openEditNameModal(chatId, customName, feishuName, event) {
+            if (event) event.stopPropagation();
+            currentEditChatId = chatId;
+            currentRealName = feishuName || '';
+
+            const realNameVal = document.getElementById('modalRealNameVal');
+            const customNameInput = document.getElementById('modalCustomNameInput');
+
+            if (realNameVal) {
+                realNameVal.textContent = currentRealName || '未获取';
+                realNameVal.title = currentRealName || '';
+            }
+            if (customNameInput) {
+                customNameInput.value = customName || '';
+                customNameInput.placeholder = currentRealName ? ('留空默认使用: ' + currentRealName) : '请输入自定义群聊名称...';
+            }
+
+            document.getElementById('editNameModal').classList.add('show');
+            setTimeout(() => {
+                if (customNameInput) customNameInput.focus();
+            }, 100);
+        }
+
+        function closeEditNameModal() {
+            currentEditChatId = null;
+            currentRealName = '';
+            document.getElementById('editNameModal').classList.remove('show');
+        }
+
+        async function refreshRealNameInModal() {
+            if (!currentEditChatId) return;
+            const btn = document.getElementById('btnRefreshRealName');
+            const realVal = document.getElementById('modalRealNameVal');
+            const customInput = document.getElementById('modalCustomNameInput');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '拉取中...';
+            }
+            try {
+                const resp = await fetch('/api/chats/fetch_name?chat_id=' + encodeURIComponent(currentEditChatId));
+                const data = await resp.json();
+                if (data.ok && data.chat_name) {
+                    currentRealName = data.chat_name;
+                    if (realVal) {
+                        realVal.textContent = currentRealName;
+                        realVal.title = currentRealName;
+                    }
+                    if (customInput && !customInput.value.trim()) {
+                        customInput.placeholder = '留空默认使用: ' + currentRealName;
+                    }
+                    showToast('已拉取飞书最新群名: ' + currentRealName, 'success');
+                } else {
+                    showToast(data.warning || data.error || '获取飞书群名失败', 'warn');
+                }
+            } catch (e) {
+                showToast('网络请求失败', 'error');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '🔄 从飞书拉取最新';
+                }
+            }
+        }
+
+        async function saveChatName() {
+            if (!currentEditChatId) return;
+            const btn = document.getElementById('btnSaveChatName');
+            const customInput = document.getElementById('modalCustomNameInput');
+            const newCustomName = customInput ? customInput.value.trim() : '';
+
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '保存中...';
+            }
+
+            try {
+                const resp = await fetch('/api/chats/' + encodeURIComponent(currentEditChatId) + '/edit_name', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_name: newCustomName,
+                        feishu_name: currentRealName
+                    })
+                });
+                const data = await resp.json();
+                if (data.ok) {
+                    const chatId = data.chat_id;
+                    const finalName = data.chat_name;
+                    const finalFeishuName = data.feishu_name;
+
+                    // 更新卡片标题
+                    const nameEl = document.getElementById('name-' + chatId);
+                    if (nameEl) {
+                        nameEl.textContent = finalName;
+                        nameEl.title = finalName;
+                    }
+
+                    // 更新原名标签
+                    const originTag = document.getElementById('origin-tag-' + chatId);
+                    if (originTag) {
+                        if (finalFeishuName && finalFeishuName !== finalName) {
+                            originTag.textContent = '原名: ' + finalFeishuName;
+                            originTag.title = '飞书真实群名: ' + finalFeishuName;
+                            originTag.style.display = '';
+                        } else {
+                            originTag.style.display = 'none';
+                        }
+                    }
+
+                    // 更新卡片编辑按钮上的 onclick
+                    const editBtn = document.querySelector('#chat-' + chatId + ' .btn-edit-name');
+                    if (editBtn) {
+                        editBtn.setAttribute('onclick', `openEditNameModal('${chatId}', '${finalName}', '${finalFeishuName || ''}', event)`);
+                    }
+
+                    showToast('群名已修改，本地缓存与云端表格已同步重命名', 'success');
+                    closeEditNameModal();
+                } else {
+                    showToast(data.error || '修改群名失败', 'error');
+                }
+            } catch (e) {
+                showToast('保存异常，请稍后重试', 'error');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '保存修改';
+                }
             }
         }
 

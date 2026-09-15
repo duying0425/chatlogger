@@ -74,3 +74,40 @@ class FetchNameTestSuite(unittest.TestCase):
         self.assertFalse(data.get("ok"))
         self.assertIn("应用未开通机器人能力", data.get("warning", ""))
 
+    @patch("app.get_feishu_client")
+    def test_edit_chat_name_api(self, mock_get_client):
+        """测试 POST /api/chats/<chat_id>/edit_name 接口"""
+        mock_client = MagicMock()
+        mock_client.update_bitable_name.return_value = {"app_name_ok": True, "table_name_ok": True}
+        mock_get_client.return_value = mock_client
+
+        chat_id = "oc_edit_api_test"
+        models.add_chat(self.user["id"], chat_id, chat_name="初始群名")
+        models.update_chat_table_info(self.user["id"], chat_id, "base_token_123", "table_id_123", "https://feishu.cn/base")
+
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+
+        resp = self.client.post(f"/api/chats/{chat_id}/edit_name", json={
+            "chat_name": "我的自定义别名",
+            "feishu_name": "官方真实群名"
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data.get("chat_name"), "我的自定义别名")
+        self.assertEqual(data.get("feishu_name"), "官方真实群名")
+
+        # 检查数据库更新
+        c = models.get_chat(self.user["id"], chat_id)
+        self.assertEqual(c["chat_name"], "我的自定义别名")
+        self.assertEqual(c["feishu_name"], "官方真实群名")
+
+        # 检查飞书重命名调用
+        mock_client.update_bitable_name.assert_called_once_with(
+            base_token="base_token_123",
+            table_id="table_id_123",
+            app_name="我的自定义别名",
+            table_name="我的自定义别名"
+        )
+

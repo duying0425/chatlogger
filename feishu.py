@@ -493,6 +493,29 @@ class FeishuClient:
             raise Exception(f"删除多维表格失败: {data}")
         return True
 
+    def update_bitable_name(self, base_token, table_id=None, app_name=None, table_name=None):
+        """更新多维表格 App 标题及/或指定 Table 数据表名称。"""
+        results = {}
+        if app_name:
+            try:
+                # 飞书更新 Bitable 元信息（名称）：PUT /bitable/v1/apps/{app_token}
+                r = self._api_put(f"/bitable/v1/apps/{base_token}", json={"name": app_name})
+                results["app_name_ok"] = (r.get("code") == 0)
+                if r.get("code") != 0:
+                    results["app_name_err"] = r.get("msg") or str(r)
+            except Exception as e:
+                results["app_name_err"] = str(e)
+        if table_id and table_name:
+            try:
+                # 飞书更新 Table 数据表名称：PATCH /bitable/v1/apps/{app_token}/tables/{table_id}
+                r = self._api_patch(f"/bitable/v1/apps/{base_token}/tables/{table_id}", json={"name": table_name})
+                results["table_name_ok"] = (r.get("code") == 0)
+                if r.get("code") != 0:
+                    results["table_name_err"] = r.get("msg") or str(r)
+            except Exception as e:
+                results["table_name_err"] = str(e)
+        return results
+
     def batch_create_records(self, base_token, table_id, records, on_batch_done=None):
         """批量创建记录，每批最多 500 条。
 

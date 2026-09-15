@@ -186,6 +186,37 @@ def update_chat_feishu_name(user_id, chat_id, feishu_name):
     conn.commit()
     conn.close()
 
+def update_chat_names(user_id, chat_id, chat_name=None, feishu_name=None):
+    """更新群聊自定义名称与/或飞书真实群名，并级联更新用户群聊搜索缓存表"""
+    conn = get_db()
+    sets = []
+    params = []
+    if chat_name is not None:
+        sets.append("chat_name = ?")
+        params.append(chat_name)
+    if feishu_name is not None:
+        sets.append("feishu_name = ?")
+        params.append(feishu_name)
+    if not sets:
+        conn.close()
+        return
+
+    params.extend([user_id, chat_id])
+    conn.execute(f"UPDATE chats SET {', '.join(sets)} WHERE user_id = ? AND chat_id = ?", params)
+
+    # 联动更新 user_chats_cache 表中的群名
+    cache_name_to_sync = feishu_name or chat_name
+    if cache_name_to_sync:
+        conn.execute("""
+            UPDATE user_chats_cache 
+            SET chat_name = ?, updated_at = CURRENT_TIMESTAMP 
+            WHERE user_id = ? AND chat_id = ?
+        """, (cache_name_to_sync, user_id, chat_id))
+
+    conn.commit()
+    conn.close()
+
+
 def update_chat_local_cache(user_id, chat_id, local_cache):
     conn = get_db()
     conn.execute(
