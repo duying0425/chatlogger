@@ -623,6 +623,49 @@ class LocalCacheTestSuite(unittest.TestCase):
         # 清理
         local_cache.delete_cache(t_id, new_name)
 
+    def test_heal_markdown_speakers(self):
+        """测试历史 Markdown 归档中未解析的 open_id 批量自愈替换为真实姓名"""
+        t_id = "oc_heal_test"
+        name = "解散群测试"
+
+        local_cache.init_chat_cache(t_id, name)
+        msg1 = {
+            "message_id": "om_01",
+            "msg_type": "text",
+            "create_time": "1694762844",
+            "body": {"content": json.dumps({"text": "测试消息1"})},
+            "sender": {"id": "ou_aaa111"}
+        }
+        msg2 = {
+            "message_id": "om_02",
+            "msg_type": "text",
+            "create_time": "1694762855",
+            "body": {"content": json.dumps({"text": "测试消息2"})},
+            "sender": {"id": "ou_bbb222"}
+        }
+
+        b1 = local_cache.format_message_to_markdown(msg1, "ou_aaa111", "2023-09-15 15:27:24")
+        b2 = local_cache.format_message_to_markdown(msg2, "ou_bbb222", "2023-09-15 15:27:35")
+        local_cache.append_messages_to_cache(t_id, name, [b1, b2])
+
+        raw_before = local_cache.get_raw_markdown(t_id, name)
+        self.assertIn("**ou_aaa111** &nbsp;", raw_before)
+        self.assertIn("**ou_bbb222** &nbsp;", raw_before)
+
+        # 执行自愈
+        name_map = {"ou_aaa111": "张三(后端)", "ou_bbb222": "李四(测试)"}
+        healed_count = local_cache.heal_markdown_speakers(t_id, name, name_map)
+        self.assertEqual(healed_count, 2)
+
+        raw_after = local_cache.get_raw_markdown(t_id, name)
+        self.assertNotIn("**ou_aaa111** &nbsp;", raw_after)
+        self.assertNotIn("**ou_bbb222** &nbsp;", raw_after)
+        self.assertIn("**张三(后端)** &nbsp;", raw_after)
+        self.assertIn("**李四(测试)** &nbsp;", raw_after)
+
+        local_cache.delete_cache(t_id, name)
+
+
 
 if __name__ == "__main__":
     unittest.main()

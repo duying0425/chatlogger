@@ -220,16 +220,60 @@ class FeishuClient:
         """
         result = {}
         try:
-            params = {"member_id_type": "open_id", "page_size": 100}
-            data = self._api_get(f"/im/v1/chats/{chat_id}/members", params=params)
-            if data.get("code") == 0:
-                for m in data.get("data", {}).get("items", []):
-                    oid = m.get("member_id", "")
-                    name = m.get("name", "")
-                    if oid and name:
-                        result[oid] = name
+            page_token = None
+            while True:
+                params = {"member_id_type": "open_id", "page_size": 100}
+                if page_token:
+                    params["page_token"] = page_token
+                data = self._api_get(f"/im/v1/chats/{chat_id}/members", params=params)
+                if data.get("code") == 0:
+                    data_body = data.get("data", {})
+                    for m in data_body.get("items", []):
+                        oid = m.get("member_id", "")
+                        name = m.get("name", "")
+                        if oid and name:
+                            result[oid] = name
+                    if not data_body.get("has_more"):
+                        break
+                    page_token = data_body.get("page_token")
+                    if not page_token:
+                        break
+                else:
+                    break
         except Exception:
             pass
+        return result
+
+    def get_users_batch(self, open_ids):
+        """批量获取用户姓名映射表 {open_id: name}。
+        调用飞书通讯录 OpenAPI: GET /contact/v3/users/batch?user_id_type=open_id&user_ids=...
+        单次最多支持 50 个 ID，自动分批拉取。
+        特别适用于已解散群聊（无法直接调用群成员接口）或已离职/已退群发言人的姓名解析。
+        """
+        if not open_ids:
+            return {}
+
+        unique_ids = list(set(oid for oid in open_ids if oid and oid.startswith("ou_")))
+        if not unique_ids:
+            return {}
+
+        result = {}
+        batch_size = 50
+        for i in range(0, len(unique_ids), batch_size):
+            chunk = unique_ids[i:i + batch_size]
+            try:
+                data = self._api_get("/contact/v3/users/batch", params={
+                    "user_id_type": "open_id",
+                    "user_ids": chunk
+                })
+                if data.get("code") == 0:
+                    for u in data.get("data", {}).get("items", []):
+                        oid = u.get("open_id")
+                        name = u.get("name")
+                        if oid and name:
+                            result[oid] = name
+            except Exception as e:
+                print(f"[feishu] 批量获取用户信息失败 (batch {i}): {e}")
         return result
 
     # ===== 消息读取 =====

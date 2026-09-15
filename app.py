@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import threading
@@ -498,6 +499,26 @@ def api_delete_chat(chat_id):
 
 # ===== 本地缓存预览与资源路由 =====
 
+def _auto_heal_markdown_speakers(chat_id, chat_name, raw_md=None):
+    """检测 Markdown 中残留的未解析 **ou_xxx** 发言人，批量通过飞书通讯录解析并就地自愈修复"""
+    if raw_md is None:
+        raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
+    if not raw_md or "**ou_" not in raw_md:
+        return raw_md
+    unresolved_ids = list(set(re.findall(r"\*\*(ou_[0-9a-fA-F]+)\*\*", raw_md)))
+    if not unresolved_ids:
+        return raw_md
+    client = get_feishu_client()
+    if client:
+        try:
+            name_map = client.get_users_batch(unresolved_ids)
+            if name_map:
+                local_cache.heal_markdown_speakers(chat_id, chat_name, name_map)
+                raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
+        except Exception as e:
+            print(f"[auto_heal] 自愈发言人失败: {e}")
+    return raw_md
+
 @app.route("/cache/<chat_id>/view")
 def cache_view(chat_id):
     """在线预览 Markdown 归档页面，支持图片灯箱和附件一键下载"""
@@ -510,7 +531,7 @@ def cache_view(chat_id):
         return "群聊未配置", 404
 
     chat_name = chat_config.get("chat_name") or chat_id
-    raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
+    raw_md = _auto_heal_markdown_speakers(chat_id, chat_name)
     info = local_cache.get_cache_info(chat_id, chat_name)
 
     return render_template_string(
@@ -536,7 +557,7 @@ def cache_raw(chat_id):
         return "群聊未配置", 404
 
     chat_name = chat_config.get("chat_name") or chat_id
-    raw_md = local_cache.get_raw_markdown(chat_id, chat_name)
+    raw_md = _auto_heal_markdown_speakers(chat_id, chat_name)
     if raw_md is None:
         return "尚未生成本地缓存", 404
 
@@ -563,6 +584,7 @@ def cache_download(chat_id):
     if not local_cache.has_cache(chat_id, chat_name):
         return "尚未生成本地缓存", 404
 
+    _auto_heal_markdown_speakers(chat_id, chat_name)
     memory_file, zip_filename = local_cache.build_cache_zip(chat_id, chat_name)
     from urllib.parse import quote
     encoded_name = quote(zip_filename)
@@ -834,6 +856,20 @@ def _process_and_save_local_cache(client, user, chat_id, chat_name, cache_messag
                 if oid and name:
                     speaker_names[oid] = name
 
+    # 兜底：对于已解散群聊或未在群成员列表中的发言人，通过批量通讯录接口解析姓名
+    missing_open_ids = set()
+    for m in cache_messages:
+        sid = m.get("sender", {}).get("id", "")
+        if sid.startswith("ou_") and sid not in speaker_names:
+            missing_open_ids.add(sid)
+    if missing_open_ids and client:
+        try:
+            batch_users = client.get_users_batch(missing_open_ids)
+            if batch_users:
+                speaker_names.update(batch_users)
+        except Exception as e:
+            print(f"[speaker_names] 批量补充发言人姓名失败: {e}")
+
     # 3. 检查并补充附件/图片（优先使用本地已存在的，缺失的才调用接口下载）
     for m in cache_messages:
         resources = extract_resource_keys(m)
@@ -917,6 +953,13 @@ def _process_and_save_local_cache(client, user, chat_id, chat_name, cache_messag
         md_blocks.append(block)
 
     local_cache.append_messages_to_cache(chat_id, chat_name, md_blocks)
+
+    # 历史未解析发言人自愈替换
+    if speaker_names:
+        try:
+            local_cache.heal_markdown_speakers(chat_id, chat_name, speaker_names)
+        except Exception as he:
+            print(f"[local_cache] 自愈历史发言人失败: {he}")
 
     max_pos = int(cache_messages[-1].get("message_position") or 0)
     if max_pos > 0:
@@ -1030,6 +1073,20 @@ def _run_sync(user_id, chat_id):
                     name = item.get("name")
                     if oid and name:
                         speaker_names[oid] = name
+
+        # 兜底：对于已解散群聊或未在群成员列表中的发言人，通过批量通讯录接口解析姓名
+        missing_open_ids = set()
+        for m in messages:
+            sid = m.get("sender", {}).get("id", "")
+            if sid.startswith("ou_") and sid not in speaker_names:
+                missing_open_ids.add(sid)
+        if missing_open_ids and client:
+            try:
+                batch_users = client.get_users_batch(missing_open_ids)
+                if batch_users:
+                    speaker_names.update(batch_users)
+            except Exception as e:
+                print(f"[speaker_names] 批量补充发言人姓名失败: {e}")
 
         # 3. 确保多维表格存在
         base_token = chat_config.get("base_token")
@@ -1712,6 +1769,7 @@ INDEX_PAGE = r"""
         .btn-refresh-realname:hover { background: #e8f3ff; border-color: #3370ff; }
         .edit-name-tip { font-size: 12px; color: #1f2329; margin-top: 12px; line-height: 1.5; background: #e8f3ff; padding: 9px 12px; border-radius: 6px; border: 1px solid #b3ccff; text-align: left; }
         /* 同步进度条 */
+        .sync-progress { margin-top: 10px; display: none; }
         .sync-progress { margin-top: 6px; display: none; }
         .sync-progress .stage { font-size: 12px; color: #4e5969; margin-bottom: 6px; line-height: 1.4; }
         .sync-progress .bar-wrap { width: 100%; height: 6px; background: #f2f3f5; border-radius: 3px; overflow: hidden; }
@@ -1871,22 +1929,44 @@ INDEX_PAGE = r"""
         <div class="chat-list" id="chatList">
             {% if chats %}
                 {% for chat in chats %}
+                <div class="chat-item {% if chat.has_cache %}is-clickable{% endif %}" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
+                    <div class="chat-info" {% if chat.has_cache %}onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览"{% endif %}>
+                        <div class="name-row">
+                            <div class="name">{{ chat.chat_name or chat.chat_id }}</div>
+                            {% if chat.has_cache %}
+                            <span class="preview-tag" onclick="openCacheView('{{ chat.chat_id }}', event)" title="点击进入 Markdown 预览">📑 预览归档</span>
                 <div class="chat-item" id="chat-{{ chat.chat_id }}" data-chat-id="{{ chat.chat_id }}" data-latest-time="{{ chat.latest_message_time or 0 }}">
                     <div class="card-header">
                         <div class="card-title-group">
+                            <div class="name" title="{{ chat.chat_name or chat.chat_id }}">{{ chat.chat_name or chat.chat_id }}</div>
                             <div class="name" id="name-{{ chat.chat_id }}" title="{{ chat.chat_name or chat.chat_id }}">{{ chat.chat_name or chat.chat_id }}</div>
                             <span class="btn-edit-name" onclick="openEditNameModal('{{ chat.chat_id }}', '{{ chat.chat_name or '' }}', '{{ chat.feishu_name or '' }}', event)" title="修改群聊名称">✏️</span>
                             <span class="badge" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text"></span></span>
                             {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}
+                            <span class="feishu-origin-tag feishu-tag" title="飞书真实群名: {{ chat.feishu_name }}">原名: {{ chat.feishu_name }}</span>
                             <span class="feishu-origin-tag feishu-tag" id="origin-tag-{{ chat.chat_id }}" title="飞书真实群名: {{ chat.feishu_name }}">原名: {{ chat.feishu_name }}</span>
                             {% else %}
                             <span class="feishu-origin-tag feishu-tag" id="origin-tag-{{ chat.chat_id }}" style="display:none;"></span>
                             {% endif %}
                         </div>
+                        <div class="meta" id="meta-{{ chat.chat_id }}">
+                            {% if chat.feishu_name and chat.feishu_name != chat.chat_name %}<span class="feishu-tag" title="飞书真实群名">{{ chat.feishu_name }}</span>{% endif %}
+                            <span class="id">{{ chat.chat_id }}</span>
+                            {% if chat.record_count %}<span class="dot">·</span><span>已同步 <span class="record-count">{{ chat.record_count }}</span> 条</span>{% endif %}
+                            {% if chat.base_url %}<span class="dot">·</span><a href="{{ chat.base_url }}" target="_blank" onclick="event.stopPropagation()">查看表格</a>{% endif %}
+                            {% if chat.has_cache %}
+                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/view" target="_blank" onclick="event.stopPropagation()" class="link-cache">在线预览</a>
+                            <span class="dot">·</span><a href="/cache/{{ chat.chat_id }}/download" onclick="event.stopPropagation()" class="link-cache">下载ZIP</a>
+                            {% endif %}
+                            <span class="latest-time-wrap" id="latest-time-wrap-{{ chat.chat_id }}" {% if not chat.latest_message_time_str %}style="display:none;"{% endif %}><span class="dot">·</span><span class="latest-time-text" id="latest-time-{{ chat.chat_id }}" title="群聊最新一条消息发送时间">最新消息: {{ chat.latest_message_time_str }}</span></span>
                         <div class="card-primary-actions">
                             <a href="/cache/{{ chat.chat_id }}/view" target="_blank" class="btn-preview-tag" id="preview-btn-{{ chat.chat_id }}" {% if not chat.has_cache %}style="display:none;"{% endif %} title="点击在新标签页查看本地 Markdown 归档与附件">📑 预览归档</a>
                             <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
                         </div>
+                        <div class="stats-row">
+                            <div class="stats" data-chat-id="{{ chat.chat_id }}">查询中...</div>
+                            <span class="badge badge-syncing" id="badge-{{ chat.chat_id }}" style="display:none;"><span class="dot-icon"></span><span class="badge-text">同步中</span></span>
+                            <label class="cache-toggle-wrap" onclick="event.stopPropagation()" title="开启后，同步时自动保存 Markdown 记录并下载图片和附件">
                     </div>
                     <div class="card-metrics">
                         <div class="metric-item id-metric" title="点击复制完整群 ID" onclick="copyChatId('{{ chat.chat_id }}', event)">
@@ -1922,10 +2002,16 @@ INDEX_PAGE = r"""
                                 <a href="/cache/{{ chat.chat_id }}/download" class="footer-link">下载 ZIP ⬇</a>
                             </span>
                         </div>
+                        <div class="sync-progress" id="progress-{{ chat.chat_id }}">
+                            <div class="stage">准备中...</div>
+                            <div class="bar-wrap"><div class="bar"></div></div>
                         <div class="footer-right">
                             <button class="btn-delete-clean" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                         </div>
                     </div>
+                    <div class="chat-actions" onclick="event.stopPropagation()">
+                        <button class="btn-sync" onclick="syncChat('{{ chat.chat_id }}', this)">同步</button>
+                        <button class="btn-delete" onclick="deleteChat('{{ chat.chat_id }}', {{ 'true' if chat.has_cache else 'false' }})">删除</button>
                     <div class="sync-progress" id="progress-{{ chat.chat_id }}">
                         <div class="stage">准备中...</div>
                         <div class="bar-wrap"><div class="bar"></div></div>
@@ -2701,14 +2787,19 @@ INDEX_PAGE = r"""
                     const pending = data.pending || 0;
                     el.textContent = '已同步 ' + synced + ' / ' + total + ' 条' + (pending > 0 ? ' · 待同步 ' + pending + ' 条' : '');
                     if (pending > 0) {
+                        updateChatStatus(chatId, 'pending', '待同步 ' + pending);
                         updateChatStatus(chatId, 'pending', '待同步 ' + pending + ' 条');
                     } else {
                         updateChatStatus(chatId, 'synced', '已同步满');
                     }
 
+                    if (data.latest_message_time_str) {
                     if (data.latest_message_time || data.latest_message_time_str) {
                         const wrap = document.getElementById('latest-time-wrap-' + chatId);
                         const text = document.getElementById('latest-time-' + chatId);
+                        if (wrap && text) {
+                            text.textContent = '最新消息: ' + data.latest_message_time_str;
+                            wrap.style.display = 'inline';
                         const sep = document.getElementById('latest-time-sep-' + chatId);
                         const formatted = formatEpochToLocal(data.latest_message_time) || data.latest_message_time_str;
                         if (wrap && text && formatted) {
@@ -2918,6 +3009,15 @@ INDEX_PAGE = r"""
             if (count === 0) {
                 tipEl.textContent = '暂无已缓存群聊';
             } else {
+                let timeStr = '';
+                if (lastUpdated) {
+                    try {
+                        const parts = lastUpdated.split(/[- :]/);
+                        if (parts.length >= 5) {
+                            timeStr = ' · ' + parseInt(parts[1]) + '月' + parseInt(parts[2]) + '日 ' + parts[3] + ':' + parts[4];
+                        }
+                    } catch(e) {}
+                }
                 const formattedTime = formatUtcToLocal(lastUpdated);
                 const timeStr = formattedTime ? (' · ' + formattedTime) : '';
                 tipEl.textContent = '已缓存 ' + count + ' 个群聊' + timeStr;

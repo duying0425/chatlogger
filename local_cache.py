@@ -656,3 +656,38 @@ def rename_chat_cache(chat_id, new_chat_name, old_chat_name=None):
     return {"renamed": True, "dir": current_dir, "md": new_md_path}
 
 
+def heal_markdown_speakers(chat_id, chat_name, open_id_to_name):
+    """扫描现有 Markdown 归档文件，将其中未解析的 **ou_xxx** 发言人替换为真实姓名。
+    返回被替换的发言人标记次数。
+    """
+    if not open_id_to_name:
+        return 0
+    md_path = get_chat_md_path(chat_id, chat_name)
+    if not os.path.exists(md_path):
+        return 0
+    try:
+        with open(md_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        replaced_count = 0
+        def _replace_speaker(match):
+            nonlocal replaced_count
+            oid = match.group(1)
+            if oid in open_id_to_name:
+                replaced_count += 1
+                return f"**{open_id_to_name[oid]}**"
+            return match.group(0)
+
+        # 匹配发言人标题行开头的 **ou_xxx** &nbsp;
+        new_content = re.sub(r"\*\*(ou_[0-9a-fA-F]+)\*\*(?=\s*&nbsp;)", _replace_speaker, content)
+
+        if replaced_count > 0:
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        return replaced_count
+    except Exception as e:
+        print(f"[local_cache] 修复 Markdown 发言人失败: {e}")
+        return 0
+
+
+
