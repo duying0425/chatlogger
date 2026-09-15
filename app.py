@@ -2911,15 +2911,6 @@ INDEX_PAGE = r"""
             if (count === 0) {
                 tipEl.textContent = '暂无已缓存群聊';
             } else {
-                let timeStr = '';
-                if (lastUpdated) {
-                    try {
-                        const parts = lastUpdated.split(/[- :]/);
-                        if (parts.length >= 5) {
-                            timeStr = ' · ' + parseInt(parts[1]) + '月' + parseInt(parts[2]) + '日 ' + parts[3] + ':' + parts[4];
-                        }
-                    } catch(e) {}
-                }
                 const formattedTime = formatUtcToLocal(lastUpdated);
                 const timeStr = formattedTime ? (' · ' + formattedTime) : '';
                 tipEl.textContent = '已缓存 ' + count + ' 个群聊' + timeStr;
