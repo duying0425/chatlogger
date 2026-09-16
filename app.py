@@ -1963,6 +1963,10 @@ INDEX_PAGE = r"""
                             <span class="footer-dot">·</span>
                             <a href="{{ chat.base_url }}" target="_blank" class="footer-link">飞书表格 ↗</a>
                             {% endif %}
+                            <span id="base-link-wrap-{{ chat.chat_id }}" {% if not chat.base_url %}style="display:none;"{% endif %}>
+                                <span class="footer-dot">·</span>
+                                <a href="{{ chat.base_url or '#' }}" target="_blank" class="footer-link">飞书表格 ↗</a>
+                            </span>
                             <span id="zip-download-wrap-{{ chat.chat_id }}" {% if not chat.has_cache %}style="display:none;"{% endif %}>
                                 <span class="footer-dot">·</span>
                                 <a href="/cache/{{ chat.chat_id }}/download" class="footer-link">下载 ZIP ⬇</a>
@@ -2496,6 +2500,30 @@ INDEX_PAGE = r"""
 
             // 更新状态为已同步满
             updateChatStatus(chatId, 'synced', '已同步满');
+
+            // 如果生成了新飞书表格链接，更新并显示链接（保证位于「下载 ZIP」前面）
+            if (result.base_url) {
+                const baseWrap = document.getElementById('base-link-wrap-' + chatId);
+                if (baseWrap) {
+                    const link = baseWrap.querySelector('a');
+                    if (link) link.href = result.base_url;
+                    baseWrap.style.display = 'inline';
+                } else {
+                    const item = document.getElementById('chat-' + chatId);
+                    const footerLeft = item ? item.querySelector('.footer-left') : null;
+                    const zipWrap = document.getElementById('zip-download-wrap-' + chatId);
+                    if (footerLeft && !footerLeft.querySelector('a[href="' + result.base_url + '"]')) {
+                        const span = document.createElement('span');
+                        span.id = 'base-link-wrap-' + chatId;
+                        span.innerHTML = '<span class="footer-dot">·</span><a href="' + result.base_url + '" target="_blank" class="footer-link">飞书表格 ↗</a>';
+                        if (zipWrap && zipWrap.parentNode === footerLeft) {
+                            footerLeft.insertBefore(span, zipWrap);
+                        } else {
+                            footerLeft.appendChild(span);
+                        }
+                    }
+                }
+            }
 
             // 若已有本地缓存，实时显示预览按钮与下载 ZIP 链接
             if (result.has_cache) {

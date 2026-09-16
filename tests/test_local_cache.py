@@ -665,6 +665,22 @@ class LocalCacheTestSuite(unittest.TestCase):
 
         local_cache.delete_cache(t_id, name)
 
+    def test_card_footer_links_order(self):
+        """测试群聊卡片底部按钮顺序：飞书表格链接必须位于下载 ZIP 链接之前"""
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["user_id"] = self.user["id"]
+
+        resp = client.get("/")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+
+        base_wrap_idx = html.find(f'id="base-link-wrap-{self.chat_id}"')
+        zip_wrap_idx = html.find(f'id="zip-download-wrap-{self.chat_id}"')
+
+        self.assertNotEqual(base_wrap_idx, -1, "base-link-wrap 元素应存在于模板中")
+        self.assertNotEqual(zip_wrap_idx, -1, "zip-download-wrap 元素应存在于模板中")
+        self.assertLess(base_wrap_idx, zip_wrap_idx, "飞书表格链接容器必须位于下载 ZIP 容器之前")
 
 
 if __name__ == "__main__":
