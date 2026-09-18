@@ -666,7 +666,11 @@ class LocalCacheTestSuite(unittest.TestCase):
         local_cache.delete_cache(t_id, name)
 
     def test_card_footer_links_order(self):
-        """测试群聊卡片底部按钮顺序：飞书表格链接必须位于下载 ZIP 链接之前"""
+        """测试群聊卡片底部按钮顺序：飞书表格链接必须位于下载 ZIP 链接之前且不重复"""
+        # 设置 base_url 测试有飞书表格链接的情况
+        test_base_url = "https://example.feishu.cn/base/bascnTest123"
+        models.update_chat_table_info(self.user["id"], self.chat_id, "test_token", "test_tbl", test_base_url)
+
         client = app.test_client()
         with client.session_transaction() as sess:
             sess["user_id"] = self.user["id"]
@@ -681,6 +685,12 @@ class LocalCacheTestSuite(unittest.TestCase):
         self.assertNotEqual(base_wrap_idx, -1, "base-link-wrap 元素应存在于模板中")
         self.assertNotEqual(zip_wrap_idx, -1, "zip-download-wrap 元素应存在于模板中")
         self.assertLess(base_wrap_idx, zip_wrap_idx, "飞书表格链接容器必须位于下载 ZIP 容器之前")
+
+        # 检查该群聊卡片中飞书表格链接是否唯一（不能出现两个飞书表格链接）
+        chat_start = html.find(f'id="chat-{self.chat_id}"')
+        chat_end = html.find(f'id="progress-{self.chat_id}"')
+        chat_card_html = html[chat_start:chat_end]
+        self.assertEqual(chat_card_html.count("飞书表格 ↗"), 1, "群聊卡片中不应存在重复的飞书表格链接")
 
 
 if __name__ == "__main__":

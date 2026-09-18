@@ -1959,10 +1959,6 @@ INDEX_PAGE = r"""
                                 <input type="checkbox" id="toggle-{{ chat.chat_id }}" onchange="toggleLocalCache('{{ chat.chat_id }}', this.checked)" {% if chat.local_cache %}checked{% endif %}>
                                 <span>本地缓存</span>
                             </label>
-                            {% if chat.base_url %}
-                            <span class="footer-dot">·</span>
-                            <a href="{{ chat.base_url }}" target="_blank" class="footer-link">飞书表格 ↗</a>
-                            {% endif %}
                             <span id="base-link-wrap-{{ chat.chat_id }}" {% if not chat.base_url %}style="display:none;"{% endif %}>
                                 <span class="footer-dot">·</span>
                                 <a href="{{ chat.base_url or '#' }}" target="_blank" class="footer-link">飞书表格 ↗</a>
@@ -2533,17 +2529,6 @@ INDEX_PAGE = r"""
                 if (previewBtn) previewBtn.style.display = 'inline-flex';
                 const zipWrap = document.getElementById('zip-download-wrap-' + chatId);
                 if (zipWrap) zipWrap.style.display = 'inline';
-            }
-
-            // 如果生成了新飞书表格链接且卡片中尚无该链接，追加到 footer-left
-            if (result.base_url) {
-                const item = document.getElementById('chat-' + chatId);
-                const footerLeft = item ? item.querySelector('.footer-left') : null;
-                if (footerLeft && !footerLeft.querySelector('a[href="' + result.base_url + '"]')) {
-                    const span = document.createElement('span');
-                    span.innerHTML = '<span class="footer-dot">·</span><a href="' + result.base_url + '" target="_blank" class="footer-link">飞书表格 ↗</a>';
-                    footerLeft.appendChild(span);
-                }
             }
         }
 
