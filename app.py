@@ -22,6 +22,7 @@ from feishu import (
     process_message_content,
     extract_resource_keys,
     SizeExceededError,
+    check_feishu_chat_error,
 )
 from feishu_doc import cache_docs_for_messages, extract_doc_links
 
@@ -37,7 +38,7 @@ sync_progress = {}
 sync_lock = threading.Lock()
 
 
-def _set_progress(chat_id, stage, current=0, total=0, message="", result=None, error=None, running=True):
+def _set_progress(chat_id, stage, current=0, total=0, message="", result=None, error=None, running=True, error_type=None):
     with sync_lock:
         sync_progress[chat_id] = {
             "running": running,
@@ -47,6 +48,7 @@ def _set_progress(chat_id, stage, current=0, total=0, message="", result=None, e
             "message": message,
             "result": result,
             "error": error,
+            "error_type": error_type,
         }
 
 
@@ -185,6 +187,13 @@ def api_chat_stats(chat_id):
     if not chat_config:
         return jsonify({"error": "群聊未配置"}), 404
 
+    chat_name = chat_config.get("chat_name") or chat_id
+    is_local_cache_enabled = bool(chat_config.get("local_cache", 0))
+    has_local_cache = local_cache.has_cache(chat_id, chat_name)
+    synced = chat_config.get("record_count", 0) or 0
+    last_pos = chat_config.get("last_synced_position", 0) or 0
+    latest_create_time = chat_config.get("latest_message_time", 0) or 0
+
     try:
         meta = client.get_chat_latest_meta(chat_id)
         total = meta.get("total", 0)
@@ -196,6 +205,25 @@ def api_chat_stats(chat_id):
         # token 失效友好提示
         if "20073" in err_str or "invalid_grant" in err_str or "Token 已过期且无法刷新" in err_str:
             return jsonify({"error": "登录已失效，请重新登录"}), 401
+
+        chat_err = check_feishu_chat_error(e)
+        if chat_err:
+            latest_time_str = timestamp_to_datetime(latest_create_time, with_seconds=False) if latest_create_time else ""
+            return jsonify({
+                "ok": True,
+                "error": None,
+                "chat_error": chat_err["type"],
+                "chat_error_msg": chat_err["friendly_msg"],
+                "badge_text": chat_err["badge_text"],
+                "total": max(synced, last_pos),
+                "synced": synced,
+                "pending": 0,
+                "need_cache_backfill": False,
+                "has_cache": has_local_cache,
+                "local_cache": is_local_cache_enabled,
+                "latest_message_time": latest_create_time,
+                "latest_message_time_str": latest_time_str,
+            }), 200
         return jsonify({"error": err_str}), 500
 
     synced = chat_config.get("record_count", 0) or 0
@@ -248,8 +276,11 @@ def api_fetch_chat_name():
         return jsonify({"ok": True, "chat_name": name})
     except Exception as e:
         err_str = str(e)
+        chat_err = check_feishu_chat_error(e)
         warning = "自动获取群名失败"
-        if "232025" in err_str:
+        if chat_err:
+            warning = f"{chat_err['friendly_msg']}，无法自动获取群名"
+        elif "232025" in err_str:
             warning = "应用未开通机器人能力，无法自动获取群名"
         return jsonify({"ok": False, "error": err_str, "warning": warning}), 200
 
@@ -394,6 +425,15 @@ def api_add_chat():
         if "232025" in name_fetch_error:
             warning += "：应用未开通机器人能力，请在飞书开发者后台「添加应用能力」中开通机器人"
         result["warning"] = warning
+        chat_err = check_feishu_chat_error(name_fetch_error)
+        if chat_err:
+            result["warning"] = f"已添加群聊，但检测到：{chat_err['friendly_msg']}，暂无法自动获取群名及同步新消息"
+        else:
+            # 获取失败原因可见，不再静默退化为 chat_id
+            warning = "已添加，但自动获取群名失败，暂用群聊 ID 代替"
+            if "232025" in name_fetch_error:
+                warning += "：应用未开通机器人能力，请在飞书开发者后台「添加应用能力」中开通机器人"
+            result["warning"] = warning
     return jsonify(result)
 
 @app.route("/api/chats/<chat_id>/toggle_cache", methods=["POST"])
@@ -1375,15 +1415,22 @@ def _run_sync(user_id, chat_id):
     except Exception as e:
         print(f"[SYNC ERROR] {traceback.format_exc()}")
         err_str = str(e)
+        chat_err = check_feishu_chat_error(e)
+        if chat_err:
+            friendly = f"{chat_err['friendly_msg']}，无法同步新消息（已有本地归档不受影响）"
+            error_type = chat_err["type"]
         # token 失效友好提示：refresh_token 一次性被用掉 / 已过期
-        if "20073" in err_str or "invalid_grant" in err_str:
+        elif "20073" in err_str or "invalid_grant" in err_str:
             friendly = "登录已失效，请重新登录后再同步"
+            error_type = "auth_invalid"
         elif "Token 已过期且无法刷新" in err_str:
             friendly = "登录已过期，请重新登录后再同步"
+            error_type = "auth_expired"
         else:
             friendly = f"同步失败: {e}"
+            error_type = "general_error"
         _set_progress(chat_id, stage="error", running=False, error=friendly,
-                      message=friendly)
+                      message=friendly, error_type=error_type)
 
 
 # ===== 页面模板 =====
@@ -1676,6 +1723,7 @@ INDEX_PAGE = r"""
         .chat-item.status-synced { border-left-color: #00b42a; }
         .chat-item.status-syncing { border-left-color: #3370ff; }
         .chat-item.status-error { border-left-color: #f53f3f; }
+        .chat-item.status-exited { border-left-color: #ff7d00; }
 
         /* 卡片头部：群名、状态Badge与核心操作（右对齐） */
         .card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -1725,6 +1773,7 @@ INDEX_PAGE = r"""
         .badge-synced { background: #e8ffea; color: #00b42a; }
         .badge-syncing { background: #e8f3ff; color: #3370ff; }
         .badge-error { background: #ffece8; color: #f53f3f; }
+        .badge-exited { background: #fff7e8; color: #d46b08; border: 1px solid #ffd591; }
         .badge .dot-icon { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
         .badge-syncing .dot-icon { animation: pulse 1.2s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -2472,6 +2521,15 @@ INDEX_PAGE = r"""
                         } else if (p.stage === 'error') {
                             showToast(p.error || p.message || '同步失败', 'error');
                             updateChatStatus(chatId, 'error', '同步失败');
+                            if (p.error_type === 'not_in_chat') {
+                                updateChatStatus(chatId, 'exited', '已退出群聊');
+                            } else if (p.error_type === 'dissolved') {
+                                updateChatStatus(chatId, 'exited', '群已解散');
+                            } else if (p.error_type === 'not_found') {
+                                updateChatStatus(chatId, 'exited', '群不存在');
+                            } else {
+                                updateChatStatus(chatId, 'error', '同步失败');
+                            }
                         }
                     } else {
                         // 同步中：更新状态徽章
@@ -2566,6 +2624,7 @@ INDEX_PAGE = r"""
             if (!item) return;
             // 清除旧状态类
             item.classList.remove('status-pending', 'status-synced', 'status-syncing', 'status-error');
+            item.classList.remove('status-pending', 'status-synced', 'status-syncing', 'status-error', 'status-exited');
             item.classList.add('status-' + status);
             // 更新徽章
             const badge = document.getElementById('badge-' + chatId);
@@ -2727,6 +2786,30 @@ INDEX_PAGE = r"""
                     } catch (parseErr) {
                         el.textContent = '服务异常 (' + resp.status + ')';
                         updateChatStatus(chatId, 'error', '查询异常');
+                        return;
+                    }
+                    if (data.chat_error) {
+                        const badgeText = data.badge_text || '已退出群聊';
+                        updateChatStatus(chatId, 'exited', badgeText);
+                        const synced = data.synced || 0;
+                        el.innerHTML = '已归档 ' + synced + ' 条 · <span style="color:#d46b08; font-weight:500;">⚠️ ' + badgeText + '</span>';
+                        const item = document.getElementById('chat-' + chatId);
+                        if (item) {
+                            item.classList.remove('needs-cache');
+                            const btn = item.querySelector('.btn-sync');
+                            if (btn) btn.title = (data.chat_error_msg || '当前账号不在群中') + '，无法拉取新消息';
+                        }
+                        if (data.latest_message_time || data.latest_message_time_str) {
+                            const wrap = document.getElementById('latest-time-wrap-' + chatId);
+                            const text = document.getElementById('latest-time-' + chatId);
+                            const sep = document.getElementById('latest-time-sep-' + chatId);
+                            const formatted = formatEpochToLocal(data.latest_message_time) || data.latest_message_time_str;
+                            if (wrap && text && formatted) {
+                                text.textContent = formatted;
+                                wrap.style.display = 'inline-flex';
+                                if (sep) sep.style.display = 'inline';
+                            }
+                        }
                         return;
                     }
                     if (data.error) {

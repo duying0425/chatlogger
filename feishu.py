@@ -905,3 +905,59 @@ def extract_resource_keys(msg):
                                                   "file_name": name})
 
     return resources
+
+
+def check_feishu_chat_error(err):
+    """
+    检查异常是否由于当前授权用户不在群内、群聊已解散或群不存在引起。
+    返回结构化字典或 None：
+    {
+        "type": "not_in_chat" | "dissolved" | "not_found",
+        "badge_text": "已退出群聊" | "群已解散" | "群不存在",
+        "friendly_msg": "...",
+    }
+    """
+    if not err:
+        return None
+    err_str = str(err).lower()
+
+    # 用户不在群聊中（主动退群、被移出、非群成员）
+    # 飞书 API 常见特征：code 230002 ("The user is not in the chat"), 230020 ("Bot or user is not in the chat")
+    not_in_chat_indicators = [
+        "230002", "230020",
+        "not in the chat", "not in chat",
+        "不在群中", "不在群聊中", "不在该群", "用户不在群",
+        "user is not in", "not a member"
+    ]
+    if any(k in err_str for k in not_in_chat_indicators):
+        return {
+            "type": "not_in_chat",
+            "badge_text": "已退出群聊",
+            "friendly_msg": "当前账号已不在该群聊中（已退出或被移出）",
+        }
+
+    # 群已被解散
+    # 飞书 API 常见特征：code 230005 ("The chat has been dissolved")
+    dissolved_indicators = [
+        "230005", "dissolved", "群已被解散", "群已解散", "chat has been dissolved"
+    ]
+    if any(k in err_str for k in dissolved_indicators):
+        return {
+            "type": "dissolved",
+            "badge_text": "群已解散",
+            "friendly_msg": "该群聊已被解散",
+        }
+
+    # 群不存在或会话已被彻底删除
+    # 飞书 API 常见特征：code 230001 ("Chat not found")
+    not_found_indicators = [
+        "230001", "chat not found", "会话不存在", "群不存在", "chat is not found"
+    ]
+    if any(k in err_str for k in not_found_indicators):
+        return {
+            "type": "not_found",
+            "badge_text": "群不存在",
+            "friendly_msg": "该群聊不存在或已被删除",
+        }
+
+    return None
